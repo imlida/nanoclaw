@@ -102,6 +102,46 @@ grep -q "CONTAINER_RUNTIME_BIN = 'container'" src/container-runtime.ts && echo "
 
 **If the chosen runtime is Docker**, no conversion is needed. Continue to 3c.
 
+### 3b-apple. Configure Apple Container Network (CRITICAL)
+
+Apple Container does NOT support `host.docker.internal`. Containers cannot access the host's `127.0.0.1`. You MUST configure the launchd service with special environment variables.
+
+Check if `~/Library/LaunchAgents/com.nanoclaw.plist` contains the required environment variables:
+
+```bash
+grep -A2 "CREDENTIAL_PROXY_HOST" ~/Library/LaunchAgents/com.nanoclaw.plist
+```
+
+If missing or incorrect, you MUST fix it. Read the current plist, then rewrite it with the correct environment variables:
+
+```xml
+<key>EnvironmentVariables</key>
+<dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/Users/$USER/.local/bin</string>
+    <key>HOME</key>
+    <string>/Users/$USER</string>
+    <key>CREDENTIAL_PROXY_HOST</key>
+    <string>0.0.0.0</string>
+    <key>APPLE_CONTAINER_HOST</key>
+    <string>192.168.64.1</string>
+</dict>
+```
+
+**Why this matters:**
+- Without `CREDENTIAL_PROXY_HOST=0.0.0.0`, the credential proxy only listens on 127.0.0.1, which containers cannot reach
+- Without `APPLE_CONTAINER_HOST=192.168.64.1`, containers try to use `host.docker.internal` which doesn't exist in Apple Container
+- Result: "Unable to connect to API (ENOTFOUND)" errors
+
+**Testing the fix:**
+After setting up the service (step 7), verify connectivity:
+```bash
+echo '{}' | container run -i --rm --entrypoint /bin/bash nanoclaw-agent:latest \
+  -c "curl -s http://192.168.64.1:3001/v1/models -H 'Authorization: Bearer test' 2>&1 | head -1"
+```
+
+Expected output should start with `{"data":` (models list). If you get "Connection refused" or "Connection timeout", the network configuration is wrong.
+
 ### 3c. Build and test
 
 Run `npx tsx setup/index.ts --step container -- --runtime <chosen>` and parse the status block.
@@ -210,6 +250,17 @@ Tell user to test: send a message in their registered chat. Show: `tail -f logs/
 **Service not starting:** Check `logs/nanoclaw.error.log`. Common: wrong Node path (re-run step 7), missing `.env` (step 4), missing channel credentials (re-invoke channel skill).
 
 **Container agent fails ("Claude Code process exited with code 1"):** Ensure the container runtime is running — `open -a Docker` (macOS Docker), `container system start` (Apple Container), or `sudo systemctl start docker` (Linux). Check container logs in `groups/main/logs/container-*.log`.
+
+**Apple Container specific issues:**
+
+- **"Unable to connect to API (ENOTFOUND)" in container logs**: The container cannot reach the credential proxy. Check:
+  1. `~/Library/LaunchAgents/com.nanoclaw.plist` has `CREDENTIAL_PROXY_HOST=0.0.0.0` and `APPLE_CONTAINER_HOST=192.168.64.1`
+  2. Credential proxy is listening on `*:3001` (not `127.0.0.1:3001`): `lsof -i :3001`
+  3. Test connectivity: `echo '{}' | container run -i --rm --entrypoint /bin/bash nanoclaw-agent:latest -c "curl -s http://192.168.64.1:3001/v1/models -H 'Authorization: Bearer test'"`
+
+- **API returns 404 Not Found (nginx)**: The credential proxy is not correctly forwarding paths. Check `src/credential-proxy.ts` is properly concatenating `upstreamUrl.pathname` with `req.url`. This was fixed in a recent update — ensure your code is up to date.
+
+- **plist format errors**: If you manually edited `com.nanoclaw.plist` and the service won't start, validate the XML: `plutil -lint ~/Library/LaunchAgents/com.nanoclaw.plist`. Invalid XML is a common cause of launchd failures.
 
 **No response to messages:** Check trigger pattern. Main channel doesn't need prefix. Check DB: `npx tsx setup/index.ts --step verify`. Check `logs/nanoclaw.log`.
 
