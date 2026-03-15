@@ -1,0 +1,18 @@
+skill: wecom
+version: 1.0.0
+description: "WeCom channel integration via @wecom/aibot-node-sdk"
+core_version: 0.1.0
+adds:
+  - src/channels/wecom.ts
+  - src/channels/wecom.test.ts
+modifies:
+  - src/channels/index.ts
+structured:
+  npm_dependencies:
+    "@wecom/aibot-node-sdk": "^1.0.1"
+  env_additions:
+    - WECOM_BOT_ID
+    - WECOM_BOT_SECRET
+conflicts: []
+depends: []
+test: "npx vitest run src/channels/wecom.test.ts"

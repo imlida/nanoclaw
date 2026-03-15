@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "add-wecom": {
+      "source": "imlida/nanoclaw-add-wecom-skill",
+      "sourceType": "github",
+      "computedHash": "fc05e32e572c62034464af9f54248595895f4daed22ca10bfc1086f772fc78e4"
+    }
+  }
+}
