@@ -365,6 +365,7 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  let lastStreamedText = '';   // Track text we already streamed to avoid duplicates
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -435,6 +436,25 @@ async function runQuery(
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
+
+      // Stream assistant text as intermediate output so the host can push
+      // progressive updates to the user while the agent is still working
+      // (e.g. between tool calls).
+      const assistantMsg = message as { message?: { content?: Array<{ type: string; text?: string }> } };
+      if (assistantMsg.message?.content) {
+        const textParts = assistantMsg.message.content
+          .filter(c => c.type === 'text' && c.text)
+          .map(c => c.text!);
+        const text = textParts.join('');
+        if (text.trim() && text !== lastStreamedText) {
+          lastStreamedText = text;
+          writeOutput({
+            status: 'success',
+            result: text,
+            newSessionId
+          });
+        }
+      }
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
@@ -451,11 +471,15 @@ async function runQuery(
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
       log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+      // Skip emitting text that was already streamed from the assistant message
+      // to avoid duplicate content on non-streaming channels.
+      const dedupedResult = (textResult && textResult === lastStreamedText) ? null : textResult;
       writeOutput({
         status: 'success',
-        result: textResult || null,
+        result: dedupedResult || null,
         newSessionId
       });
+      lastStreamedText = '';  // Reset for next turn
     }
   }
 

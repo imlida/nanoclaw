@@ -5,6 +5,7 @@ const wecomMocks = vi.hoisted(() => {
     static instances: MockWSClient[] = [];
 
     sendMessage = vi.fn(async () => ({}));
+    replyStream = vi.fn(async () => ({}));
     disconnect = vi.fn();
     private handlers = new Map<string, Array<(payload?: unknown) => void>>();
 
@@ -31,9 +32,11 @@ const wecomMocks = vi.hoisted(() => {
     }
   }
 
+  let reqCounter = 0;
   return {
     MockWSClient,
     mockReadEnvFile: vi.fn(),
+    mockGenerateReqId: vi.fn((prefix: string) => `${prefix}_${++reqCounter}`),
     mockLogger: {
       debug: vi.fn(),
       info: vi.fn(),
@@ -47,6 +50,7 @@ vi.mock('@wecom/aibot-node-sdk', () => ({
   default: {
     WSClient: wecomMocks.MockWSClient,
   },
+  generateReqId: wecomMocks.mockGenerateReqId,
 }));
 
 vi.mock('../env.js', () => ({
@@ -263,5 +267,154 @@ describe('WecomChannel', () => {
     expect(channel!.ownsJid('wc:user:alice')).toBe(true);
     expect(channel!.ownsJid('wc:group:team')).toBe(true);
     expect(channel!.ownsJid('tg:123')).toBe(false);
+  });
+
+  describe('createStream', () => {
+    function setupStreamChannel() {
+      wecomMocks.mockReadEnvFile.mockReturnValue({
+        WECOM_BOT_ID: 'bot-id',
+        WECOM_BOT_SECRET: 'bot-secret',
+      });
+      registeredGroups['wc:user:alice'] = {
+        name: 'Alice',
+        folder: 'wecom_main',
+        trigger: '@Andy',
+        added_at: new Date().toISOString(),
+      };
+      return createChannel()!;
+    }
+
+    it('returns null when no inbound frame was received', async () => {
+      const channel = setupStreamChannel();
+      await channel.connect();
+
+      // No message received yet — no stored frame
+      const stream = channel.createStream!('wc:user:alice');
+      expect(stream).toBeNull();
+    });
+
+    it('returns a StreamSession after an inbound frame is received', async () => {
+      const channel = setupStreamChannel();
+      await channel.connect();
+      const client = wecomMocks.MockWSClient.instances[0];
+
+      // Receive a message to store the frame
+      client.emit('message.text', {
+        headers: { req_id: 'req-42' },
+        body: {
+          msgid: 'm-10',
+          msgtype: 'text',
+          chattype: 'single',
+          from: { userid: 'alice' },
+          create_time: 1710000000000,
+          text: { content: 'hi' },
+        },
+      });
+
+      const stream = channel.createStream!('wc:user:alice');
+      expect(stream).not.toBeNull();
+      expect(stream).toHaveProperty('update');
+      expect(stream).toHaveProperty('finish');
+    });
+
+    it('calls replyStream with finish=false on update and finish=true on finish', async () => {
+      const channel = setupStreamChannel();
+      await channel.connect();
+      const client = wecomMocks.MockWSClient.instances[0];
+
+      client.emit('message.text', {
+        headers: { req_id: 'req-42' },
+        body: {
+          msgid: 'm-10',
+          msgtype: 'text',
+          chattype: 'single',
+          from: { userid: 'alice' },
+          create_time: 1710000000000,
+          text: { content: 'hi' },
+        },
+      });
+
+      const stream = channel.createStream!('wc:user:alice')!;
+
+      await stream.update('part 1');
+      expect(client.replyStream).toHaveBeenCalledWith(
+        { headers: { req_id: 'req-42' } },
+        expect.any(String),
+        'part 1',
+        false,
+      );
+
+      await stream.finish('part 1\n\npart 2');
+      expect(client.replyStream).toHaveBeenLastCalledWith(
+        { headers: { req_id: 'req-42' } },
+        expect.any(String),
+        'part 1\n\npart 2',
+        true,
+      );
+    });
+
+    it('ignores calls after the stream has been finished', async () => {
+      const channel = setupStreamChannel();
+      await channel.connect();
+      const client = wecomMocks.MockWSClient.instances[0];
+
+      client.emit('message.text', {
+        headers: { req_id: 'req-42' },
+        body: {
+          msgid: 'm-10',
+          msgtype: 'text',
+          chattype: 'single',
+          from: { userid: 'alice' },
+          create_time: 1710000000000,
+          text: { content: 'hi' },
+        },
+      });
+
+      const stream = channel.createStream!('wc:user:alice')!;
+
+      await stream.finish('done');
+      client.replyStream.mockClear();
+
+      await stream.update('should be ignored');
+      expect(client.replyStream).not.toHaveBeenCalled();
+    });
+
+    it('falls back to sendMessage when content exceeds stream byte limit', async () => {
+      const channel = setupStreamChannel();
+      await channel.connect();
+      const client = wecomMocks.MockWSClient.instances[0];
+
+      client.emit('message.text', {
+        headers: { req_id: 'req-42' },
+        body: {
+          msgid: 'm-10',
+          msgtype: 'text',
+          chattype: 'single',
+          from: { userid: 'alice' },
+          create_time: 1710000000000,
+          text: { content: 'hi' },
+        },
+      });
+
+      const stream = channel.createStream!('wc:user:alice')!;
+
+      // Create text that exceeds 20480 bytes
+      const bigText = 'A'.repeat(21000);
+      await stream.update(bigText);
+
+      // Should have finished the stream with a truncated version
+      expect(client.replyStream).toHaveBeenCalledWith(
+        { headers: { req_id: 'req-42' } },
+        expect.any(String),
+        expect.any(String),
+        true,  // auto-finished
+      );
+
+      // Should have sent a follow-up markdown message with full text
+      expect(client.sendMessage).toHaveBeenCalledWith('alice', {
+        msgtype: 'markdown',
+        markdown: { content: bigText },
+      });
+    });
   });
 });

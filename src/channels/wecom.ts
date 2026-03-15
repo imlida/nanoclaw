@@ -1,16 +1,21 @@
 import AiBot, {
+  generateReqId,
   type BaseMessage,
   type FileMessage,
   type ImageMessage,
   type MixedMessage,
   type VoiceMessage,
   type WsFrame,
+  type WsFrameHeaders,
 } from '@wecom/aibot-node-sdk';
 
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
-import type { Channel } from '../types.js';
+import type { Channel, StreamSession } from '../types.js';
 import { registerChannel, type ChannelOpts } from './registry.js';
+
+/** Maximum content size for a single replyStream call (WeCom limit: 20480 bytes). */
+const STREAM_MAX_BYTES = 20480;
 
 type WecomFrame =
   | WsFrame<BaseMessage>
@@ -119,6 +124,8 @@ export class WecomChannel implements Channel {
   private client: InstanceType<typeof AiBot.WSClient> | null = null;
   private connected = false;
   private connectPromise: Promise<void> | null = null;
+  /** Most recent inbound frame per JID — needed for replyStream. */
+  private lastFrameByJid = new Map<string, WsFrameHeaders>();
 
   constructor(
     private opts: ChannelOpts,
@@ -190,6 +197,9 @@ export class WecomChannel implements Channel {
     const chatInfo = toChatJid(body);
     if (!chatInfo) return;
 
+    // Store the frame for streaming replies (replyStream needs the original req_id)
+    this.lastFrameByJid.set(chatInfo.jid, { headers: frame.headers });
+
     const timestamp = toIsoTimestamp(body.create_time);
     const senderId = body.from.userid;
     const senderName = senderId;
@@ -246,6 +256,74 @@ export class WecomChannel implements Channel {
 
   ownsJid(jid: string): boolean {
     return jid.startsWith('wc:user:') || jid.startsWith('wc:group:');
+  }
+
+  /**
+   * Create a streaming session for the given JID.
+   *
+   * Uses the WeCom `replyStream` API which updates a single message in-place.
+   * Requires a stored inbound frame (the req_id is needed for the reply
+   * channel). Returns null when no frame is available (e.g. scheduled tasks)
+   * — callers should fall back to `sendMessage`.
+   *
+   * If content exceeds WeCom's 20 480-byte limit, the stream is automatically
+   * finished with the portion that fits and the overflow is sent as a separate
+   * markdown message via `sendMessage`.
+   */
+  createStream(jid: string): StreamSession | null {
+    if (!this.client) return null;
+
+    const frame = this.lastFrameByJid.get(jid);
+    if (!frame) return null;
+
+    const streamId = generateReqId('stream');
+    const client = this.client;
+    let finished = false;
+
+    logger.debug({ jid, streamId }, 'WeCom stream created');
+
+    const sendChunk = async (
+      text: string,
+      finish: boolean,
+    ): Promise<void> => {
+      if (finished) {
+        logger.warn({ jid, streamId }, 'WeCom stream already finished');
+        return;
+      }
+
+      const bytes = Buffer.byteLength(text, 'utf8');
+
+      if (bytes <= STREAM_MAX_BYTES) {
+        await client.replyStream(frame, streamId, text, finish);
+        if (finish) finished = true;
+        return;
+      }
+
+      // Content exceeds the stream limit: truncate to the last full character
+      // boundary that fits, finish the stream, then send the full text as a
+      // standalone markdown message so nothing is lost.
+      let truncated = text;
+      while (Buffer.byteLength(truncated, 'utf8') > STREAM_MAX_BYTES) {
+        truncated = truncated.slice(0, -100);
+      }
+
+      await client.replyStream(frame, streamId, truncated, true);
+      finished = true;
+
+      // Send full content as a follow-up message
+      const targetId = parseTargetJid(jid);
+      if (targetId) {
+        await client.sendMessage(targetId, {
+          msgtype: 'markdown',
+          markdown: { content: text },
+        });
+      }
+    };
+
+    return {
+      update: (text: string) => sendChunk(text, false),
+      finish: (text: string) => sendChunk(text, true),
+    };
   }
 
   async disconnect(): Promise<void> {

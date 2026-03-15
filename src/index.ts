@@ -58,7 +58,7 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup } from './types.js';
+import { Channel, NewMessage, RegisteredGroup, type StreamSession } from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -212,6 +212,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Streaming state: create a fresh stream per response cycle.
+  // WeCom's replyStream updates a single message in-place; when one response
+  // ends (null-result marker) we finish the current stream and create a new
+  // one for the next IPC-driven response.
+  let currentStream: StreamSession | null =
+    channel.createStream?.(chatJid) ?? null;
+  let accumulatedText = '';
+
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
     if (result.result) {
@@ -223,14 +231,45 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        await channel.sendMessage(chatJid, text);
+        if (currentStream) {
+          // Accumulate text and push an intermediate stream update so the
+          // user sees content appear progressively in a single message.
+          accumulatedText += (accumulatedText ? '\n\n' : '') + text;
+          try {
+            await currentStream.update(accumulatedText);
+          } catch (streamErr) {
+            logger.warn(
+              { group: group.name, err: streamErr },
+              'Stream update failed, falling back to sendMessage',
+            );
+            await channel.sendMessage(chatJid, text);
+            currentStream = null;
+          }
+        } else {
+          await channel.sendMessage(chatJid, text);
+        }
         outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
     }
 
-    if (result.status === 'success') {
+    if (result.status === 'success' && !result.result) {
+      // Null-result marker → current response cycle is done.
+      // Finalize the stream so WeCom removes the "generating" indicator.
+      if (currentStream && accumulatedText) {
+        try {
+          await currentStream.finish(accumulatedText);
+        } catch (streamErr) {
+          logger.warn(
+            { group: group.name, err: streamErr },
+            'Stream finish failed',
+          );
+        }
+      }
+      // Reset for the next response cycle (IPC follow-up messages)
+      accumulatedText = '';
+      currentStream = channel.createStream?.(chatJid) ?? null;
       queue.notifyIdle(chatJid);
     }
 
@@ -246,6 +285,13 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // If we already sent output to the user, don't roll back the cursor —
     // the user got their response and re-processing would send duplicates.
     if (outputSentToUser) {
+      // Close the stream cleanly even on error so the WeCom message is
+      // marked as finished and the user doesn't see a perpetual spinner.
+      if (currentStream && accumulatedText) {
+        currentStream.finish(accumulatedText).catch((err) =>
+          logger.warn({ group: group.name, err }, 'Stream finish on error failed'),
+        );
+      }
       logger.warn(
         { group: group.name },
         'Agent error after output was sent, skipping cursor rollback to prevent duplicates',

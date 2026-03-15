@@ -77,6 +77,19 @@ export interface TaskRunLog {
   error: string | null;
 }
 
+// --- Streaming abstraction ---
+
+/**
+ * A handle to an active stream that progressively updates a single message.
+ * Channels that support streaming (e.g. WeCom replyStream) implement this.
+ */
+export interface StreamSession {
+  /** Replace the visible content with the new accumulated text. */
+  update(text: string): Promise<void>;
+  /** Send the final content and close the stream. */
+  finish(text: string): Promise<void>;
+}
+
 // --- Channel abstraction ---
 
 export interface Channel {
@@ -90,6 +103,10 @@ export interface Channel {
   setTyping?(jid: string, isTyping: boolean): Promise<void>;
   // Optional: sync group/chat names from the platform.
   syncGroups?(force: boolean): Promise<void>;
+  // Optional: streaming message support. Returns a StreamSession for the
+  // given JID, or null if streaming is not available (e.g. no stored frame).
+  // Callers should fall back to sendMessage when null is returned.
+  createStream?(jid: string): StreamSession | null;
 }
 
 // Callback type that channels use to deliver inbound messages
