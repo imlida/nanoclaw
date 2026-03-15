@@ -224,6 +224,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let currentStream: StreamSession | null =
     channel.createStream?.(chatJid) ?? null;
   let accumulatedText = '';
+  let currentStreamText = ''; // Text being actively streamed token-by-token
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
@@ -236,24 +237,47 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
-        if (currentStream) {
-          // Accumulate text and push an intermediate stream update so the
-          // user sees content appear progressively in a single message.
-          accumulatedText += (accumulatedText ? '\n\n' : '') + text;
-          try {
-            await currentStream.update(accumulatedText);
-          } catch (streamErr) {
-            logger.warn(
-              { group: group.name, err: streamErr },
-              'Stream update failed, falling back to sendMessage',
-            );
-            await channel.sendMessage(chatJid, text);
-            currentStream = null;
+        if (result.streaming) {
+          // Token-level streaming update: replace the current streaming segment
+          // (agent-runner sends the full accumulated text for the current message)
+          currentStreamText = text;
+          if (currentStream) {
+            const displayText = accumulatedText
+              ? accumulatedText + '\n\n' + currentStreamText
+              : currentStreamText;
+            try {
+              await currentStream.update(displayText);
+              outputSentToUser = true;
+            } catch (streamErr) {
+              logger.warn(
+                { group: group.name, err: streamErr },
+                'Stream update failed',
+              );
+              currentStream = null;
+            }
           }
+          // For non-stream channels: don't send individual streaming updates,
+          // wait for the committed (non-streaming) output instead
         } else {
-          await channel.sendMessage(chatJid, text);
+          // Complete message commit: append to accumulated text
+          accumulatedText += (accumulatedText ? '\n\n' : '') + text;
+          currentStreamText = '';
+          if (currentStream) {
+            try {
+              await currentStream.update(accumulatedText);
+            } catch (streamErr) {
+              logger.warn(
+                { group: group.name, err: streamErr },
+                'Stream update failed, falling back to sendMessage',
+              );
+              await channel.sendMessage(chatJid, text);
+              currentStream = null;
+            }
+          } else {
+            await channel.sendMessage(chatJid, text);
+          }
+          outputSentToUser = true;
         }
-        outputSentToUser = true;
       }
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
@@ -261,6 +285,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
     if (result.status === 'success' && !result.result) {
       // Null-result marker → current response cycle is done.
+      // Commit any pending streaming text before finishing
+      if (currentStreamText) {
+        accumulatedText += (accumulatedText ? '\n\n' : '') + currentStreamText;
+        currentStreamText = '';
+      }
       // Finalize the stream so WeCom removes the "generating" indicator.
       if (currentStream && accumulatedText) {
         try {
@@ -292,6 +321,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (outputSentToUser) {
       // Close the stream cleanly even on error so the WeCom message is
       // marked as finished and the user doesn't see a perpetual spinner.
+      if (currentStreamText) {
+        accumulatedText += (accumulatedText ? '\n\n' : '') + currentStreamText;
+        currentStreamText = '';
+      }
       if (currentStream && accumulatedText) {
         currentStream
           .finish(accumulatedText)

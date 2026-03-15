@@ -34,6 +34,7 @@ interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  streaming?: boolean;
 }
 
 interface SessionEntry {
@@ -115,6 +116,37 @@ function writeOutput(output: ContainerOutput): void {
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
+}
+
+/**
+ * Format a tool call for display to the user using Markdown.
+ * Shows the actual command for Bash, file path for Read/Write/Edit, etc.
+ */
+function formatToolCall(name: string, input: Record<string, unknown>): string {
+  const truncate = (s: string, max: number) => s.length > max ? s.slice(0, max) + '...' : s;
+  switch (name) {
+    case 'Bash': {
+      const cmd = typeof input.command === 'string' ? input.command : '';
+      if (!cmd) return '**Bash**';
+      return `**Bash**\n\`\`\`bash\n${truncate(cmd, 200)}\n\`\`\``;
+    }
+    case 'Read':
+      return `**Read** \`${truncate(String(input.file_path || ''), 120)}\``;
+    case 'Write':
+      return `**Write** \`${truncate(String(input.file_path || ''), 120)}\``;
+    case 'Edit':
+      return `**Edit** \`${truncate(String(input.file_path || ''), 120)}\``;
+    case 'Grep':
+      return `**Grep** \`${truncate(String(input.pattern || ''), 80)}\``;
+    case 'Glob':
+      return `**Glob** \`${truncate(String(input.pattern || ''), 80)}\``;
+    case 'WebSearch':
+      return `**WebSearch** \`${truncate(String(input.query || ''), 80)}\``;
+    case 'WebFetch':
+      return `**WebFetch** \`${truncate(String(input.url || ''), 120)}\``;
+    default:
+      return `**${name}**`;
+  }
 }
 
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
@@ -366,6 +398,19 @@ async function runQuery(
   let messageCount = 0;
   let resultCount = 0;
   let lastStreamedText = '';   // Track text we already streamed to avoid duplicates
+  let streamingText = '';      // Text accumulated from stream_event deltas (current message)
+  let streamingTimer: ReturnType<typeof setTimeout> | null = null;
+  let currentToolName = '';    // Tool name of the content block currently being streamed
+  let currentToolInput = '';   // Accumulated input JSON for the current tool_use block
+  let pendingToolCalls: Array<{ name: string; input: Record<string, unknown> }> = [];
+  const STREAM_FLUSH_MS = 300; // Debounce interval for streaming output
+
+  const flushStreaming = () => {
+    if (streamingTimer) { clearTimeout(streamingTimer); streamingTimer = null; }
+    if (streamingText.trim()) {
+      writeOutput({ status: 'success', result: streamingText, newSessionId, streaming: true });
+    }
+  };
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -414,6 +459,7 @@ async function runQuery(
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       settingSources: ['project', 'user'],
+      includePartialMessages: true,
       mcpServers: {
         nanoclaw: {
           command: 'node',
@@ -434,27 +480,84 @@ async function runQuery(
     const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
     log(`[msg #${messageCount}] type=${msgType}`);
 
-    if (message.type === 'assistant' && 'uuid' in message) {
-      lastAssistantUuid = (message as { uuid: string }).uuid;
+    // Token-level streaming: handle stream_event messages from includePartialMessages
+    if (message.type === 'stream_event') {
+      const evt = (message as { event: { type: string; index?: number; delta?: { type: string; text?: string; partial_json?: string }; content_block?: { type: string; name?: string } } }).event;
+      if (evt?.type === 'content_block_delta' && evt.delta?.type === 'text_delta' && evt.delta?.text) {
+        streamingText += evt.delta.text;
+        // Debounce: schedule flush if not already pending
+        if (!streamingTimer) {
+          streamingTimer = setTimeout(flushStreaming, STREAM_FLUSH_MS);
+        }
+      } else if (evt?.type === 'content_block_delta' && evt.delta?.type === 'input_json_delta' && evt.delta?.partial_json) {
+        // Accumulate tool input JSON so we can show the command to the user
+        if (currentToolName) {
+          currentToolInput += evt.delta.partial_json;
+        }
+      } else if (evt?.type === 'content_block_start' && evt.content_block?.type === 'tool_use' && evt.content_block?.name) {
+        // Start tracking a new tool_use content block
+        currentToolName = evt.content_block.name;
+        currentToolInput = '';
+      } else if (evt?.type === 'content_block_stop') {
+        // If we were tracking a tool_use block, parse its input and store
+        if (currentToolName) {
+          try {
+            const input = JSON.parse(currentToolInput);
+            pendingToolCalls.push({ name: currentToolName, input });
+          } catch { /* incomplete JSON */ }
+          currentToolName = '';
+          currentToolInput = '';
+        }
+      } else if (evt?.type === 'message_stop') {
+        // Message complete: flush streaming buffer, then emit a single non-streaming
+        // commit so the host accumulates this text segment.
+        // Token-level streaming updates were already sent by flushStreaming().
+        if (streamingTimer) { clearTimeout(streamingTimer); streamingTimer = null; }
+        if (streamingText.trim()) {
+          writeOutput({ status: 'success', result: streamingText, newSessionId });
+          lastStreamedText = streamingText;
+        }
+        streamingText = '';
 
-      // Stream assistant text as intermediate output so the host can push
-      // progressive updates to the user while the agent is still working
-      // (e.g. between tool calls).
-      const assistantMsg = message as { message?: { content?: Array<{ type: string; text?: string }> } };
-      if (assistantMsg.message?.content) {
-        const textParts = assistantMsg.message.content
-          .filter(c => c.type === 'text' && c.text)
-          .map(c => c.text!);
-        const text = textParts.join('');
-        if (text.trim() && text !== lastStreamedText) {
-          lastStreamedText = text;
-          writeOutput({
-            status: 'success',
-            result: text,
-            newSessionId
-          });
+        // Show tool calls with details (e.g. Bash commands) so the user
+        // sees what's happening during the tool execution phase.
+        if (pendingToolCalls.length > 0) {
+          const lines = pendingToolCalls.map(tc => formatToolCall(tc.name, tc.input));
+          const toolStatus = lines.join('\n');
+          log(`Tools pending: ${toolStatus}`);
+          writeOutput({ status: 'success', result: toolStatus, newSessionId, streaming: true });
+          pendingToolCalls = [];
         }
       }
+    }
+
+    // Show tool execution progress (fires periodically during long-running tools)
+    if (message.type === 'tool_progress') {
+      const tp = message as { tool_name: string; elapsed_time_seconds: number };
+      log(`Tool progress: ${tp.tool_name} (${Math.round(tp.elapsed_time_seconds)}s)`);
+      writeOutput({
+        status: 'success',
+        result: `[${tp.tool_name}: ${Math.round(tp.elapsed_time_seconds)}s]`,
+        newSessionId,
+        streaming: true,
+      });
+    }
+
+    // Tool use summary -- emitted after tools execute, before next assistant message.
+    // Contains a human-readable description of what the tools did.
+    if (message.type === 'tool_use_summary') {
+      const tus = message as { summary: string };
+      if (tus.summary?.trim()) {
+        log(`Tool summary: ${tus.summary.slice(0, 200)}`);
+        writeOutput({ status: 'success', result: tus.summary, newSessionId, streaming: true });
+      }
+    }
+
+    if (message.type === 'assistant' && 'uuid' in message) {
+      lastAssistantUuid = (message as { uuid: string }).uuid;
+      // Text output is handled by stream_event handlers (text_delta + message_stop).
+      // With includePartialMessages, partial assistant messages arrive during generation
+      // but would cause duplicates if committed here since stream_events already cover it.
     }
 
     if (message.type === 'system' && message.subtype === 'init') {
@@ -482,6 +585,9 @@ async function runQuery(
       lastStreamedText = '';  // Reset for next turn
     }
   }
+
+  // Clean up streaming timer
+  if (streamingTimer) { clearTimeout(streamingTimer); streamingTimer = null; }
 
   ipcPolling = false;
   log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`);
