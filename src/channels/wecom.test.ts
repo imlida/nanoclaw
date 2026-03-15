@@ -407,7 +407,7 @@ describe('WecomChannel', () => {
         { headers: { req_id: 'req-42' } },
         expect.any(String),
         expect.any(String),
-        true,  // auto-finished
+        true, // auto-finished
       );
 
       // Should have sent a follow-up markdown message with full text

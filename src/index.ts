@@ -58,7 +58,12 @@ import {
   shouldDropMessage,
 } from './sender-allowlist.js';
 import { startSchedulerLoop } from './task-scheduler.js';
-import { Channel, NewMessage, RegisteredGroup, type StreamSession } from './types.js';
+import {
+  Channel,
+  NewMessage,
+  RegisteredGroup,
+  type StreamSession,
+} from './types.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -288,9 +293,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       // Close the stream cleanly even on error so the WeCom message is
       // marked as finished and the user doesn't see a perpetual spinner.
       if (currentStream && accumulatedText) {
-        currentStream.finish(accumulatedText).catch((err) =>
-          logger.warn({ group: group.name, err }, 'Stream finish on error failed'),
-        );
+        currentStream
+          .finish(accumulatedText)
+          .catch((err) =>
+            logger.warn(
+              { group: group.name, err },
+              'Stream finish on error failed',
+            ),
+          );
       }
       logger.warn(
         { group: group.name },

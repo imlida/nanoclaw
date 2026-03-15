@@ -282,10 +282,7 @@ export class WecomChannel implements Channel {
 
     logger.debug({ jid, streamId }, 'WeCom stream created');
 
-    const sendChunk = async (
-      text: string,
-      finish: boolean,
-    ): Promise<void> => {
+    const sendChunk = async (text: string, finish: boolean): Promise<void> => {
       if (finished) {
         logger.warn({ jid, streamId }, 'WeCom stream already finished');
         return;
