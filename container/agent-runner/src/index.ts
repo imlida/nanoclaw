@@ -510,7 +510,7 @@ async function runQuery(
         currentToolName = evt.content_block.name;
         currentToolInput = '';
         // Immediately show tool name as a streaming preview
-        writeOutput({ status: 'success', result: `**${currentToolName}** ...`, newSessionId, streaming: true });
+        writeOutput({ status: 'success', result: `**${currentToolName}** ...`, newSessionId, streaming: true, type: 'tool_status' });
       } else if (evt?.type === 'content_block_stop') {
         // If we were tracking a tool_use block, emit the full formatted tool call
         if (currentToolName) {
@@ -546,6 +546,7 @@ async function runQuery(
         result: `[${tp.tool_name}: ${Math.round(tp.elapsed_time_seconds)}s]`,
         newSessionId,
         streaming: true,
+        type: 'tool_status',
       });
     }
 
@@ -555,7 +556,7 @@ async function runQuery(
       const tus = message as { summary: string };
       if (tus.summary?.trim()) {
         log(`Tool summary: ${tus.summary.slice(0, 200)}`);
-        writeOutput({ status: 'success', result: tus.summary, newSessionId, streaming: true });
+        writeOutput({ status: 'success', result: tus.summary, newSessionId, streaming: true, type: 'tool_status' });
       }
     }
 

@@ -64,6 +64,7 @@ import {
   RegisteredGroup,
   type StreamSession,
 } from './types.js';
+import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
 // Re-export for backwards compatibility during refactor
@@ -217,6 +218,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
+  // Check if tool call display should be hidden for this channel
+  const hideToolCalls =
+    channel.name === 'wecom' &&
+    (() => {
+      const envVars = readEnvFile(['WECOM_HIDE_TOOL_CALLS']);
+      const val =
+        process.env.WECOM_HIDE_TOOL_CALLS ||
+        envVars.WECOM_HIDE_TOOL_CALLS ||
+        '';
+      return val.toLowerCase() === 'true' || val === '1';
+    })();
+
   // Streaming state: create a fresh stream per response cycle.
   // WeCom's replyStream updates a single message in-place; when one response
   // ends (null-result marker) we finish the current stream and create a new
@@ -225,9 +238,57 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     channel.createStream?.(chatJid) ?? null;
   let accumulatedText = '';
   let currentStreamText = ''; // Text being actively streamed token-by-token
+  // Hide mode: tool calls are accumulated into an overlay buffer for real-time
+  // display, then cleared when the text response arrives.
+  let toolCallsOverlay = '';       // Accumulated completed tool call info
+  let currentToolStreamText = '';  // Ephemeral tool streaming (preview, progress)
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
+
+    // Hide mode: intercept tool_status for accumulated overlay display
+    if (hideToolCalls && result.type === 'tool_status' && result.result) {
+      const raw =
+        typeof result.result === 'string'
+          ? result.result
+          : JSON.stringify(result.result);
+      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+      if (text) {
+        if (result.streaming) {
+          // Streaming tool status (preview, progress, summary): ephemeral
+          currentToolStreamText = text;
+        } else {
+          // Non-streaming tool status (full tool info from content_block_stop):
+          // accumulate permanently in overlay, replace any ephemeral preview
+          toolCallsOverlay += (toolCallsOverlay ? '\n' : '') + text;
+          currentToolStreamText = '';
+        }
+        // Build display: accumulated text + tool overlay + ephemeral tool text
+        if (currentStream) {
+          const parts: string[] = [];
+          if (accumulatedText) parts.push(accumulatedText);
+          const toolDisplay = currentToolStreamText
+            ? (toolCallsOverlay ? toolCallsOverlay + '\n' + currentToolStreamText : currentToolStreamText)
+            : toolCallsOverlay;
+          if (toolDisplay) parts.push(toolDisplay);
+          if (parts.length > 0) {
+            try {
+              await currentStream.update(parts.join('\n\n'));
+              outputSentToUser = true;
+            } catch (streamErr) {
+              logger.warn(
+                { group: group.name, err: streamErr },
+                'Stream update failed',
+              );
+              currentStream = null;
+            }
+          }
+        }
+      }
+      resetIdleTimer();
+      return;
+    }
+
     if (result.result) {
       const raw =
         typeof result.result === 'string'
@@ -237,6 +298,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
+        // Non-tool content arrived: clear tool overlay (hide mode)
+        if (hideToolCalls && (toolCallsOverlay || currentToolStreamText)) {
+          toolCallsOverlay = '';
+          currentToolStreamText = '';
+        }
+
         if (result.streaming) {
           // Token-level streaming update: replace the current streaming segment
           // (agent-runner sends the full accumulated text for the current message)
@@ -290,6 +357,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         accumulatedText += (accumulatedText ? '\n\n' : '') + currentStreamText;
         currentStreamText = '';
       }
+      // Clear tool overlay so it doesn't bleed into the finalized message
+      toolCallsOverlay = '';
+      currentToolStreamText = '';
       // Finalize the stream so WeCom removes the "generating" indicator.
       if (currentStream && accumulatedText) {
         try {
