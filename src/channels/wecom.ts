@@ -15,6 +15,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 
+import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import type { Channel, StreamSession } from '../types.js';
@@ -380,12 +381,19 @@ export class WecomChannel implements Channel {
 
     if (!content) return;
 
+    // WeCom AI Bot SDK only delivers group messages that @ the bot.
+    // Normalize so TRIGGER_PATTERN matches, same as Telegram channel.
+    const normalizedContent =
+      chatInfo.isGroup && !TRIGGER_PATTERN.test(content)
+        ? `@${ASSISTANT_NAME} ${content}`
+        : content;
+
     this.opts.onMessage(chatInfo.jid, {
       id: body.msgid,
       chat_jid: chatInfo.jid,
       sender: senderId,
       sender_name: senderName,
-      content,
+      content: normalizedContent,
       timestamp,
       is_from_me: false,
     });
