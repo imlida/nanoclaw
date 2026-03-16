@@ -27,6 +27,7 @@ import {
   PROXY_BIND_HOST,
 } from './container-runtime.js';
 import {
+  deleteSession,
   getAllChats,
   getAllRegisteredGroups,
   getAllSessions,
@@ -57,6 +58,10 @@ import {
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
+import {
+  handleSlashCommand,
+  isSlashCommand,
+} from './slash-commands.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import {
   Channel,
@@ -705,6 +710,23 @@ async function main(): Promise<void> {
       if (trimmed === '/remote-control' || trimmed === '/remote-control-end') {
         handleRemoteControl(trimmed, chatJid, msg).catch((err) =>
           logger.error({ err, chatJid }, 'Remote control command error'),
+        );
+        return;
+      }
+
+      // Slash commands — intercept before storage, execute directly
+      if (isSlashCommand(trimmed)) {
+        handleSlashCommand(trimmed, chatJid, msg, {
+          findChannel: (jid) => findChannel(channels, jid),
+          registeredGroups: () => registeredGroups,
+          sessions: () => sessions,
+          clearSession: (groupFolder) => {
+            delete sessions[groupFolder];
+            deleteSession(groupFolder);
+          },
+          queue,
+        }).catch((err) =>
+          logger.error({ err, chatJid }, 'Slash command error'),
         );
         return;
       }

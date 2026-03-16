@@ -60,6 +60,46 @@ const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
+/** Slash commands that the host should have intercepted. */
+const SLASH_COMMANDS = new Set(['/clear', '/help', '/status', '/compact']);
+
+/**
+ * Check if a prompt consists entirely of a slash command (possibly formatted
+ * with message metadata). Returns the response text if intercepted, or null
+ * to continue normal processing.
+ */
+function interceptSlashCommand(prompt: string): string | null {
+  // Extract the first non-empty line that looks like content (skip timestamp/sender metadata)
+  const lines = prompt.split('\n').map(l => l.trim()).filter(Boolean);
+  // Check whether any line is exactly a known slash command
+  for (const line of lines) {
+    const cmd = line.split(/\s+/)[0]?.toLowerCase();
+    if (SLASH_COMMANDS.has(cmd) && line === cmd) {
+      log(`Intercepted slash command in agent runner: ${cmd}`);
+      switch (cmd) {
+        case '/clear':
+          return 'Session clear requested. This should be handled by the host. If you see this message, the session was not properly cleared — please try again.';
+        case '/help':
+          return [
+            '**Available Commands**',
+            '',
+            '`/clear` - Clear conversation session and start fresh',
+            '`/status` - Show current group and session status',
+            '`/help` - Show this help message',
+            '`/compact` - Session compaction info',
+          ].join('\n');
+        case '/status':
+          return 'Status information is available from the host. Send `/status` again if this did not work.';
+        case '/compact':
+          return 'Session compaction is handled automatically by the agent session.';
+        default:
+          return `Unknown command: \`${cmd}\``;
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Push-based async iterable for streaming user messages to the SDK.
  * Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
@@ -646,6 +686,22 @@ async function main(): Promise<void> {
   let resumeAt: string | undefined;
   try {
     while (true) {
+      // Slash command interception: bypass LLM if the prompt is a known command
+      const slashResponse = interceptSlashCommand(prompt);
+      if (slashResponse) {
+        writeOutput({ status: 'success', result: slashResponse, newSessionId: sessionId });
+        writeOutput({ status: 'success', result: null, newSessionId: sessionId });
+
+        log('Slash command handled, waiting for next IPC message...');
+        const nextMessage = await waitForIpcMessage();
+        if (nextMessage === null) {
+          log('Close sentinel received after slash command, exiting');
+          break;
+        }
+        prompt = nextMessage;
+        continue;
+      }
+
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
       const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
