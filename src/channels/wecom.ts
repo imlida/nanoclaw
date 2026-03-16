@@ -112,8 +112,9 @@ function formatImageInfo(
   localPath?: string,
 ): string {
   if (localPath) {
-    // Return Markdown image syntax with local file path
-    return `![WeCom Image](${localPath})`;
+    // Use the container-accessible path (wecom-media is mounted at /workspace/wecom-media)
+    const containerPath = `/workspace/wecom-media/${path.basename(localPath)}`;
+    return `![WeCom Image](${containerPath})`;
   }
   if (image?.url) {
     // Fallback: include URL info (note: encrypted, 5-min expiry)

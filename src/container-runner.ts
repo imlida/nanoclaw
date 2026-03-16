@@ -193,6 +193,16 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // WeCom media: downloaded images need to be readable inside the container
+  const wecomMediaDir = path.join(DATA_DIR, 'wecom-media');
+  if (fs.existsSync(wecomMediaDir)) {
+    mounts.push({
+      hostPath: wecomMediaDir,
+      containerPath: '/workspace/wecom-media',
+      readonly: true,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
