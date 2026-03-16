@@ -240,8 +240,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let currentStreamText = ''; // Text being actively streamed token-by-token
   // Hide mode: tool calls are accumulated into an overlay buffer for real-time
   // display, then cleared when the text response arrives.
-  let toolCallsOverlay = '';       // Accumulated completed tool call info
-  let currentToolStreamText = '';  // Ephemeral tool streaming (preview, progress)
+  let toolCallsOverlay = ''; // Accumulated completed tool call info
+  let currentToolStreamText = ''; // Ephemeral tool streaming (preview, progress)
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
@@ -268,7 +268,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           const parts: string[] = [];
           if (accumulatedText) parts.push(accumulatedText);
           const toolDisplay = currentToolStreamText
-            ? (toolCallsOverlay ? toolCallsOverlay + '\n' + currentToolStreamText : currentToolStreamText)
+            ? toolCallsOverlay
+              ? toolCallsOverlay + '\n' + currentToolStreamText
+              : currentToolStreamText
             : toolCallsOverlay;
           if (toolDisplay) parts.push(toolDisplay);
           if (parts.length > 0) {
