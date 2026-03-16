@@ -35,6 +35,7 @@ interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   streaming?: boolean;
+  type?: 'tool_status';
 }
 
 interface SessionEntry {
@@ -529,7 +530,7 @@ async function runQuery(
           const lines = pendingToolCalls.map(tc => formatToolCall(tc.name, tc.input));
           const toolStatus = lines.join('\n');
           log(`Tools pending: ${toolStatus}`);
-          writeOutput({ status: 'success', result: toolStatus, newSessionId });
+          writeOutput({ status: 'success', result: toolStatus, newSessionId, type: 'tool_status' });
           pendingToolCalls = [];
         }
       }

@@ -49,6 +49,7 @@ export interface ContainerOutput {
   newSessionId?: string;
   error?: string;
   streaming?: boolean;
+  type?: 'tool_status';
 }
 
 interface VolumeMount {
