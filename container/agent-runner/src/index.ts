@@ -144,6 +144,10 @@ function formatToolCall(name: string, input: Record<string, unknown>): string {
       return `**WebSearch** \`${truncate(String(input.query || ''), 80)}\``;
     case 'WebFetch':
       return `**WebFetch** \`${truncate(String(input.url || ''), 120)}\``;
+    case 'Skill':
+      return `**Skill** \`${truncate(String(input.skill || ''), 80)}\``;
+    case 'Task':
+      return `**Task** \`${truncate(String(input.description || ''), 80)}\``;
     default:
       return `**${name}**`;
   }
@@ -525,7 +529,7 @@ async function runQuery(
           const lines = pendingToolCalls.map(tc => formatToolCall(tc.name, tc.input));
           const toolStatus = lines.join('\n');
           log(`Tools pending: ${toolStatus}`);
-          writeOutput({ status: 'success', result: toolStatus, newSessionId, streaming: true });
+          writeOutput({ status: 'success', result: toolStatus, newSessionId });
           pendingToolCalls = [];
         }
       }
