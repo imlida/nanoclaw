@@ -1,5 +1,4 @@
 import { ASSISTANT_NAME } from './config.js';
-import { deleteSession } from './db.js';
 import { logger } from './logger.js';
 import type { Channel, NewMessage, RegisteredGroup } from './types.js';
 import type { GroupQueue } from './group-queue.js';
