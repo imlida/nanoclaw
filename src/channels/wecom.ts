@@ -245,11 +245,26 @@ export class WecomChannel implements Channel {
   private registerEventHandlers(
     client: InstanceType<typeof AiBot.WSClient>,
   ): void {
-    client.on('message.text', (frame: WecomFrame) => void this.handleFrame(frame));
-    client.on('message.voice', (frame: WecomFrame) => void this.handleFrame(frame));
-    client.on('message.mixed', (frame: WecomFrame) => void this.handleFrame(frame));
-    client.on('message.image', (frame: WecomFrame) => void this.handleFrame(frame));
-    client.on('message.file', (frame: WecomFrame) => void this.handleFrame(frame));
+    client.on(
+      'message.text',
+      (frame: WecomFrame) => void this.handleFrame(frame),
+    );
+    client.on(
+      'message.voice',
+      (frame: WecomFrame) => void this.handleFrame(frame),
+    );
+    client.on(
+      'message.mixed',
+      (frame: WecomFrame) => void this.handleFrame(frame),
+    );
+    client.on(
+      'message.image',
+      (frame: WecomFrame) => void this.handleFrame(frame),
+    );
+    client.on(
+      'message.file',
+      (frame: WecomFrame) => void this.handleFrame(frame),
+    );
   }
 
   /**
@@ -272,11 +287,17 @@ export class WecomChannel implements Channel {
       const localPath = path.join(WECOM_MEDIA_DIR, localFilename);
 
       fs.writeFileSync(localPath, buffer);
-      logger.debug({ localPath, originalFilename: filename }, 'WeCom image downloaded');
+      logger.debug(
+        { localPath, originalFilename: filename },
+        'WeCom image downloaded',
+      );
 
       return localPath;
     } catch (err) {
-      logger.warn({ err, url: url.substring(0, 50) }, 'Failed to download WeCom image');
+      logger.warn(
+        { err, url: url.substring(0, 50) },
+        'Failed to download WeCom image',
+      );
       return undefined;
     }
   }

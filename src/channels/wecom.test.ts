@@ -235,7 +235,10 @@ describe('WecomChannel', () => {
         mixed: {
           msg_item: [
             { msgtype: 'text', text: { content: '@Andy summarize this' } },
-            { msgtype: 'image', image: { url: 'https://example.com/img', aeskey: 'key123' } },
+            {
+              msgtype: 'image',
+              image: { url: 'https://example.com/img', aeskey: 'key123' },
+            },
           ],
         },
         quote: {
@@ -254,7 +257,9 @@ describe('WecomChannel', () => {
       expect.objectContaining({
         // Image is now downloaded and formatted as Markdown image
         content: expect.stringMatching(
-          new RegExp('@Andy summarize this\\n!\\[WeCom Image\\]\\(.+\\.jpg\\)\\n\\n\\[Quoted message\\]\\nearlier context'),
+          new RegExp(
+            '@Andy summarize this\\n!\\[WeCom Image\\]\\(.+\\.jpg\\)\\n\\n\\[Quoted message\\]\\nearlier context',
+          ),
         ),
       }),
     );
