@@ -3,11 +3,17 @@ import AiBot, {
   type BaseMessage,
   type FileMessage,
   type ImageMessage,
+  type ImageContent,
   type MixedMessage,
+  type MixedMsgItem,
   type VoiceMessage,
   type WsFrame,
   type WsFrameHeaders,
 } from '@wecom/aibot-node-sdk';
+
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
@@ -76,30 +82,86 @@ function extractQuoteText(quote: unknown): string | undefined {
   return Array.from(new Set(parts)).join('\n').slice(0, 400);
 }
 
-function extractMixedText(body: MixedMessage): string {
+/** Directory for storing downloaded WeCom media files. */
+const WECOM_MEDIA_DIR = path.join(
+  process.env.DATA_DIR || path.join(process.cwd(), 'data'),
+  'wecom-media',
+);
+
+/** Ensure the media directory exists. */
+function ensureMediaDir(): void {
+  if (!fs.existsSync(WECOM_MEDIA_DIR)) {
+    fs.mkdirSync(WECOM_MEDIA_DIR, { recursive: true });
+  }
+}
+
+/** Generate a unique filename for downloaded media. */
+function generateMediaFilename(ext: string = 'jpg'): string {
+  const timestamp = Date.now();
+  const random = crypto.randomBytes(4).toString('hex');
+  return `wecom-${timestamp}-${random}.${ext}`;
+}
+
+/**
+ * Format image information for inclusion in message content.
+ * Returns a Markdown-style description with the local file path if available.
+ */
+function formatImageInfo(
+  image: ImageContent | undefined,
+  localPath?: string,
+): string {
+  if (localPath) {
+    // Return Markdown image syntax with local file path
+    return `![WeCom Image](${localPath})`;
+  }
+  if (image?.url) {
+    // Fallback: include URL info (note: encrypted, 5-min expiry)
+    return `[WeCom image: ${image.url.substring(0, 80)}...]`;
+  }
+  return '[WeCom image attachment]';
+}
+
+function extractMixedText(
+  body: MixedMessage,
+  imagePathMap?: Map<number, string>,
+): string {
   const parts: string[] = [];
-  for (const item of body.mixed?.msg_item || []) {
+  const items = body.mixed?.msg_item || [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
     if (item.msgtype === 'text' && item.text?.content) {
       parts.push(item.text.content.trim());
     } else if (item.msgtype === 'image') {
-      parts.push('[WeCom image attachment]');
+      const localPath = imagePathMap?.get(i);
+      parts.push(formatImageInfo(item.image, localPath));
     }
   }
   return parts.filter(Boolean).join('\n').trim();
 }
 
-function buildContent(body: BaseMessage): string {
+function buildContent(
+  body: BaseMessage,
+  imageLocalPath?: string,
+  mixedImagePaths?: Map<number, string>,
+): string {
   switch (body.msgtype) {
     case 'text':
       return body.text?.content?.trim() || '';
     case 'voice':
       return body.voice?.content?.trim() || '[WeCom voice message]';
     case 'mixed':
-      return extractMixedText(body as MixedMessage);
-    case 'image':
-      return '[WeCom image attachment]';
-    case 'file':
+      return extractMixedText(body as MixedMessage, mixedImagePaths);
+    case 'image': {
+      const imageBody = body as ImageMessage;
+      return formatImageInfo(imageBody.image, imageLocalPath);
+    }
+    case 'file': {
+      const fileBody = body as FileMessage;
+      if (fileBody.file?.url) {
+        return `[WeCom file: ${fileBody.file.url.substring(0, 80)}...]`;
+      }
       return '[WeCom file attachment]';
+    }
     default:
       return `[WeCom ${String(body.msgtype)} message]`;
   }
@@ -183,14 +245,69 @@ export class WecomChannel implements Channel {
   private registerEventHandlers(
     client: InstanceType<typeof AiBot.WSClient>,
   ): void {
-    client.on('message.text', (frame: WecomFrame) => this.handleFrame(frame));
-    client.on('message.voice', (frame: WecomFrame) => this.handleFrame(frame));
-    client.on('message.mixed', (frame: WecomFrame) => this.handleFrame(frame));
-    client.on('message.image', (frame: WecomFrame) => this.handleFrame(frame));
-    client.on('message.file', (frame: WecomFrame) => this.handleFrame(frame));
+    client.on('message.text', (frame: WecomFrame) => void this.handleFrame(frame));
+    client.on('message.voice', (frame: WecomFrame) => void this.handleFrame(frame));
+    client.on('message.mixed', (frame: WecomFrame) => void this.handleFrame(frame));
+    client.on('message.image', (frame: WecomFrame) => void this.handleFrame(frame));
+    client.on('message.file', (frame: WecomFrame) => void this.handleFrame(frame));
   }
 
-  private handleFrame(frame: WecomFrame): void {
+  /**
+   * Download an image from WeCom and save it locally.
+   * Returns the local file path on success, undefined on failure.
+   */
+  private async downloadImage(
+    url: string,
+    aeskey?: string,
+  ): Promise<string | undefined> {
+    if (!this.client || !url) return undefined;
+
+    try {
+      ensureMediaDir();
+      const { buffer, filename } = await this.client.downloadFile(url, aeskey);
+
+      // Determine file extension from filename or default to jpg
+      const ext = filename ? path.extname(filename).slice(1) || 'jpg' : 'jpg';
+      const localFilename = generateMediaFilename(ext);
+      const localPath = path.join(WECOM_MEDIA_DIR, localFilename);
+
+      fs.writeFileSync(localPath, buffer);
+      logger.debug({ localPath, originalFilename: filename }, 'WeCom image downloaded');
+
+      return localPath;
+    } catch (err) {
+      logger.warn({ err, url: url.substring(0, 50) }, 'Failed to download WeCom image');
+      return undefined;
+    }
+  }
+
+  /**
+   * Download all images from a mixed message.
+   * Returns a map of item index to local file path.
+   */
+  private async downloadMixedImages(
+    body: MixedMessage,
+  ): Promise<Map<number, string>> {
+    const pathMap = new Map<number, string>();
+    const items = body.mixed?.msg_item || [];
+
+    const downloadPromises = items.map(async (item, index) => {
+      if (item.msgtype === 'image' && item.image?.url) {
+        const localPath = await this.downloadImage(
+          item.image.url,
+          item.image.aeskey,
+        );
+        if (localPath) {
+          pathMap.set(index, localPath);
+        }
+      }
+    });
+
+    await Promise.all(downloadPromises);
+    return pathMap;
+  }
+
+  private async handleFrame(frame: WecomFrame): Promise<void> {
     const body = frame.body;
     if (!body?.msgid || !body.from?.userid) return;
 
@@ -204,7 +321,6 @@ export class WecomChannel implements Channel {
     const senderId = body.from.userid;
     const senderName = senderId;
     const chatName = chatInfo.isGroup ? chatInfo.targetId : senderName;
-    const content = withQuote(buildContent(body), body.quote).trim();
 
     this.opts.onChatMetadata(
       chatInfo.jid,
@@ -221,6 +337,25 @@ export class WecomChannel implements Channel {
       );
       return;
     }
+
+    // Download images based on message type
+    let imageLocalPath: string | undefined;
+    let mixedImagePaths: Map<number, string> | undefined;
+
+    if (body.msgtype === 'image') {
+      const imageBody = body as ImageMessage;
+      imageLocalPath = await this.downloadImage(
+        imageBody.image?.url,
+        imageBody.image?.aeskey,
+      );
+    } else if (body.msgtype === 'mixed') {
+      mixedImagePaths = await this.downloadMixedImages(body as MixedMessage);
+    }
+
+    const content = withQuote(
+      buildContent(body, imageLocalPath, mixedImagePaths),
+      body.quote,
+    ).trim();
 
     if (!content) return;
 

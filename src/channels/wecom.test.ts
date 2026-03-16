@@ -1,11 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+// Mock node:fs to avoid actual file system operations
+vi.mock('node:fs', () => ({
+  existsSync: vi.fn(() => true),
+  mkdirSync: vi.fn(),
+  writeFileSync: vi.fn(),
+}));
+
+// Mock node:crypto for deterministic filenames
+vi.mock('node:crypto', () => ({
+  randomBytes: vi.fn(() => ({
+    toString: () => 'abcd1234',
+  })),
+}));
+
 const wecomMocks = vi.hoisted(() => {
   class MockWSClient {
     static instances: MockWSClient[] = [];
 
     sendMessage = vi.fn(async () => ({}));
     replyStream = vi.fn(async () => ({}));
+    downloadFile = vi.fn(async () => ({
+      buffer: Buffer.from('mock-image-data'),
+      filename: 'test.jpg',
+    }));
     disconnect = vi.fn();
     private handlers = new Map<string, Array<(payload?: unknown) => void>>();
 
@@ -217,7 +235,7 @@ describe('WecomChannel', () => {
         mixed: {
           msg_item: [
             { msgtype: 'text', text: { content: '@Andy summarize this' } },
-            { msgtype: 'image', image: { url: 'https://example.com/img' } },
+            { msgtype: 'image', image: { url: 'https://example.com/img', aeskey: 'key123' } },
           ],
         },
         quote: {
@@ -226,12 +244,25 @@ describe('WecomChannel', () => {
       },
     });
 
+    // Wait for async handleFrame to complete
+    await vi.waitFor(() => {
+      expect(onMessage).toHaveBeenCalled();
+    });
+
     expect(onMessage).toHaveBeenCalledWith(
       'wc:group:group-2',
       expect.objectContaining({
-        content:
-          '@Andy summarize this\n[WeCom image attachment]\n\n[Quoted message]\nearlier context',
+        // Image is now downloaded and formatted as Markdown image
+        content: expect.stringMatching(
+          new RegExp('@Andy summarize this\\n!\\[WeCom Image\\]\\(.+\\.jpg\\)\\n\\n\\[Quoted message\\]\\nearlier context'),
+        ),
       }),
+    );
+
+    // Verify downloadFile was called with correct URL and aeskey
+    expect(client.downloadFile).toHaveBeenCalledWith(
+      'https://example.com/img',
+      'key123',
     );
   });
 
