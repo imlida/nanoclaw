@@ -238,9 +238,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     (() => {
       const envVars = readEnvFile(['WECOM_SHOW_THINKING']);
       const val =
-        process.env.WECOM_SHOW_THINKING ||
-        envVars.WECOM_SHOW_THINKING ||
-        '';
+        process.env.WECOM_SHOW_THINKING || envVars.WECOM_SHOW_THINKING || '';
       return val.toLowerCase() === 'true' || val === '1';
     })();
 
@@ -282,7 +280,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         try {
           await currentStream.finish(accumulatedText);
         } catch (e) {
-          logger.debug({ group: group.name, err: e }, 'Failed to finish old stream before switch');
+          logger.debug(
+            { group: group.name, err: e },
+            'Failed to finish old stream before switch',
+          );
         }
       }
       currentStream = pipedStream;
@@ -652,9 +653,14 @@ async function startMessageLoop(): Promise<void> {
             if (showThinkingForPiped) {
               const pipedStream = channel.createStream?.(chatJid);
               if (pipedStream) {
-                pipedStream.update('思考中...').catch((err) =>
-                  logger.warn({ chatJid, err }, 'Failed to send thinking indicator for piped message'),
-                );
+                pipedStream
+                  .update('思考中...')
+                  .catch((err) =>
+                    logger.warn(
+                      { chatJid, err },
+                      'Failed to send thinking indicator for piped message',
+                    ),
+                  );
                 // Store the stream so outputCallback can use it
                 queue.setActiveStream(chatJid, pipedStream);
               }
