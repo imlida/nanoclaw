@@ -232,6 +232,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       return val.toLowerCase() === 'true' || val === '1';
     })();
 
+  // Check if "thinking" indicator should be shown (WeCom only, default: false)
+  const showThinking =
+    channel.name === 'wecom' &&
+    (() => {
+      const envVars = readEnvFile(['WECOM_SHOW_THINKING']);
+      const val =
+        process.env.WECOM_SHOW_THINKING ||
+        envVars.WECOM_SHOW_THINKING ||
+        '';
+      return val.toLowerCase() === 'true' || val === '1';
+    })();
+
   // Streaming state: create a fresh stream per response cycle.
   // WeCom's replyStream updates a single message in-place; when one response
   // ends (null-result marker) we finish the current stream and create a new
@@ -239,6 +251,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let currentStream: StreamSession | null =
     channel.createStream?.(chatJid) ?? null;
   let accumulatedText = '';
+
+  // Send immediate "thinking" acknowledgment via stream if enabled
+  if (showThinking && currentStream) {
+    try {
+      await currentStream.update('思考中...');
+      logger.debug({ group: group.name }, 'Sent thinking indicator via stream');
+    } catch (streamErr) {
+      logger.warn(
+        { group: group.name, err: streamErr },
+        'Failed to send thinking indicator',
+      );
+      currentStream = null;
+    }
+  }
   let currentStreamText = ''; // Text being actively streamed token-by-token
   // Hide mode: tool calls are accumulated into an overlay buffer for real-time
   // display, then cleared when the text response arrives.
@@ -247,6 +273,25 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
     // Streaming output callback — called for each agent result
+
+    // Check if a piped message created a new stream for us to use
+    const pipedStream = queue.consumeActiveStream(chatJid);
+    if (pipedStream) {
+      // Finish the old stream if it has content, then switch to the new one
+      if (currentStream && accumulatedText) {
+        try {
+          await currentStream.finish(accumulatedText);
+        } catch (e) {
+          logger.debug({ group: group.name, err: e }, 'Failed to finish old stream before switch');
+        }
+      }
+      currentStream = pipedStream;
+      accumulatedText = '';
+      currentStreamText = '';
+      toolCallsOverlay = '';
+      currentToolStreamText = '';
+      logger.debug({ group: group.name }, 'Switched to piped stream');
+    }
 
     // Hide mode: intercept tool_status for accumulated overlay display
     if (hideToolCalls && result.type === 'tool_status' && result.result) {
@@ -591,6 +636,30 @@ async function startMessageLoop(): Promise<void> {
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
+
+            // Send immediate "thinking" acknowledgment for piped messages if enabled
+            const showThinkingForPiped =
+              channel.name === 'wecom' &&
+              (() => {
+                const envVars = readEnvFile(['WECOM_SHOW_THINKING']);
+                const val =
+                  process.env.WECOM_SHOW_THINKING ||
+                  envVars.WECOM_SHOW_THINKING ||
+                  '';
+                return val.toLowerCase() === 'true' || val === '1';
+              })();
+
+            if (showThinkingForPiped) {
+              const pipedStream = channel.createStream?.(chatJid);
+              if (pipedStream) {
+                pipedStream.update('思考中...').catch((err) =>
+                  logger.warn({ chatJid, err }, 'Failed to send thinking indicator for piped message'),
+                );
+                // Store the stream so outputCallback can use it
+                queue.setActiveStream(chatJid, pipedStream);
+              }
+            }
+
             // Show typing indicator while the container processes the piped message
             channel
               .setTyping?.(chatJid, true)

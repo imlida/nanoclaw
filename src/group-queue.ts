@@ -4,6 +4,7 @@ import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
 import { logger } from './logger.js';
+import type { StreamSession } from './types.js';
 
 interface QueuedTask {
   id: string;
@@ -25,6 +26,8 @@ interface GroupState {
   containerName: string | null;
   groupFolder: string | null;
   retryCount: number;
+  /** Stream created for piped messages, to be picked up by outputCallback */
+  pipedStream: StreamSession | null;
 }
 
 export class GroupQueue {
@@ -49,6 +52,7 @@ export class GroupQueue {
         containerName: null,
         groupFolder: null,
         retryCount: 0,
+        pipedStream: null,
       };
       this.groups.set(groupJid, state);
     }
@@ -151,6 +155,24 @@ export class GroupQueue {
     if (state.pendingTasks.length > 0) {
       this.closeStdin(groupJid);
     }
+  }
+
+  /**
+   * Store a stream for piped messages so outputCallback can pick it up.
+   */
+  setActiveStream(groupJid: string, stream: StreamSession): void {
+    const state = this.getGroup(groupJid);
+    state.pipedStream = stream;
+  }
+
+  /**
+   * Retrieve and consume the piped stream (returns null if none stored).
+   */
+  consumeActiveStream(groupJid: string): StreamSession | null {
+    const state = this.getGroup(groupJid);
+    const stream = state.pipedStream;
+    state.pipedStream = null;
+    return stream;
   }
 
   /**
