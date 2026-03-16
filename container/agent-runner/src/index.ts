@@ -61,7 +61,7 @@ const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 
 /** Slash commands that the host should have intercepted. */
-const SLASH_COMMANDS = new Set(['/clear', '/help', '/status', '/compact']);
+const SLASH_COMMANDS = new Set(['/clear', '/help', '/status']);
 
 /**
  * Check if a prompt consists entirely of a slash command (possibly formatted
@@ -86,12 +86,9 @@ function interceptSlashCommand(prompt: string): string | null {
             '`/clear` - Clear conversation session and start fresh',
             '`/status` - Show current group and session status',
             '`/help` - Show this help message',
-            '`/compact` - Session compaction info',
           ].join('\n');
         case '/status':
           return 'Status information is available from the host. Send `/status` again if this did not work.';
-        case '/compact':
-          return 'Session compaction is handled automatically by the agent session.';
         default:
           return `Unknown command: \`${cmd}\``;
       }
