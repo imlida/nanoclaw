@@ -5,12 +5,7 @@ import type { Channel, NewMessage, RegisteredGroup } from './types.js';
 import type { GroupQueue } from './group-queue.js';
 
 /** Known slash commands that should be intercepted before reaching the LLM. */
-const KNOWN_COMMANDS = new Set([
-  '/clear',
-  '/help',
-  '/status',
-  '/compact',
-]);
+const KNOWN_COMMANDS = new Set(['/clear', '/help', '/status', '/compact']);
 
 export interface SlashCommandDeps {
   findChannel: (jid: string) => Channel | undefined;
@@ -74,7 +69,8 @@ export async function handleSlashCommand(
       response = executeStatus(group, chatJid, deps);
       break;
     case '/compact':
-      response = '`/compact` is handled automatically by the agent session. No manual action needed.';
+      response =
+        '`/compact` is handled automatically by the agent session. No manual action needed.';
       break;
     default:
       response = `Unknown command: \`${cmd}\`. Type \`/help\` to see available commands.`;
@@ -83,7 +79,10 @@ export async function handleSlashCommand(
   try {
     await channel.sendMessage(chatJid, response);
   } catch (err) {
-    logger.error({ chatJid, cmd, err }, 'Failed to send slash command response');
+    logger.error(
+      { chatJid, cmd, err },
+      'Failed to send slash command response',
+    );
   }
 }
 
@@ -138,4 +137,3 @@ function executeStatus(
 
   return lines.join('\n');
 }
-

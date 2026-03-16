@@ -58,10 +58,7 @@ import {
   loadSenderAllowlist,
   shouldDropMessage,
 } from './sender-allowlist.js';
-import {
-  handleSlashCommand,
-  isSlashCommand,
-} from './slash-commands.js';
+import { handleSlashCommand, isSlashCommand } from './slash-commands.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import {
   Channel,
