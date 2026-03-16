@@ -407,7 +407,6 @@ async function runQuery(
   let streamingTimer: ReturnType<typeof setTimeout> | null = null;
   let currentToolName = '';    // Tool name of the content block currently being streamed
   let currentToolInput = '';   // Accumulated input JSON for the current tool_use block
-  let pendingToolCalls: Array<{ name: string; input: Record<string, unknown> }> = [];
   const STREAM_FLUSH_MS = 300; // Debounce interval for streaming output
 
   const flushStreaming = () => {
@@ -500,39 +499,41 @@ async function runQuery(
           currentToolInput += evt.delta.partial_json;
         }
       } else if (evt?.type === 'content_block_start' && evt.content_block?.type === 'tool_use' && evt.content_block?.name) {
-        // Start tracking a new tool_use content block
-        currentToolName = evt.content_block.name;
-        currentToolInput = '';
-      } else if (evt?.type === 'content_block_stop') {
-        // If we were tracking a tool_use block, parse its input and store
-        if (currentToolName) {
-          try {
-            const input = JSON.parse(currentToolInput);
-            pendingToolCalls.push({ name: currentToolName, input });
-          } catch { /* incomplete JSON */ }
-          currentToolName = '';
-          currentToolInput = '';
-        }
-      } else if (evt?.type === 'message_stop') {
-        // Message complete: flush streaming buffer, then emit a single non-streaming
-        // commit so the host accumulates this text segment.
-        // Token-level streaming updates were already sent by flushStreaming().
+        // Flush any pending streaming text as a non-streaming commit before tool preview
         if (streamingTimer) { clearTimeout(streamingTimer); streamingTimer = null; }
         if (streamingText.trim()) {
           writeOutput({ status: 'success', result: streamingText, newSessionId });
           lastStreamedText = streamingText;
         }
         streamingText = '';
-
-        // Show tool calls with details (e.g. Bash commands) so the user
-        // sees what's happening during the tool execution phase.
-        if (pendingToolCalls.length > 0) {
-          const lines = pendingToolCalls.map(tc => formatToolCall(tc.name, tc.input));
-          const toolStatus = lines.join('\n');
-          log(`Tools pending: ${toolStatus}`);
-          writeOutput({ status: 'success', result: toolStatus, newSessionId, type: 'tool_status' });
-          pendingToolCalls = [];
+        // Start tracking the new tool_use content block
+        currentToolName = evt.content_block.name;
+        currentToolInput = '';
+        // Immediately show tool name as a streaming preview
+        writeOutput({ status: 'success', result: `**${currentToolName}** ...`, newSessionId, streaming: true });
+      } else if (evt?.type === 'content_block_stop') {
+        // If we were tracking a tool_use block, emit the full formatted tool call
+        if (currentToolName) {
+          let formatted = `**${currentToolName}**`;
+          try {
+            const input = JSON.parse(currentToolInput);
+            formatted = formatToolCall(currentToolName, input);
+          } catch { /* incomplete JSON, use name-only fallback */ }
+          log(`Tool call: ${formatted}`);
+          writeOutput({ status: 'success', result: formatted, newSessionId, type: 'tool_status' });
+          currentToolName = '';
+          currentToolInput = '';
         }
+      } else if (evt?.type === 'message_stop') {
+        // Message complete: flush streaming buffer, then emit a single non-streaming
+        // commit so the host accumulates this text segment.
+        // Tool calls were already emitted individually at content_block_stop.
+        if (streamingTimer) { clearTimeout(streamingTimer); streamingTimer = null; }
+        if (streamingText.trim()) {
+          writeOutput({ status: 'success', result: streamingText, newSessionId });
+          lastStreamedText = streamingText;
+        }
+        streamingText = '';
       }
     }
 
