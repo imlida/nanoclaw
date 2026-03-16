@@ -69,7 +69,7 @@ export async function handleSlashCommand(
       response = executeStatus(group, chatJid, deps);
       break;
     default:
-      response = `Unknown command: \`${cmd}\`. Type \`/help\` to see available commands.`;
+      response = `未知命令: \`${cmd}\`。输入 \`/help\` 查看可用命令。`;
   }
 
   try {
@@ -95,19 +95,19 @@ function executeClear(
     deps.clearSession(group.folder);
     // Close the active container if one is running
     deps.queue.closeStdin(chatJid);
-    return 'Session cleared. The next message will start a fresh conversation.';
+    return '会话已清除。下一条消息将开始全新对话。';
   }
 
-  return 'No active session to clear.';
+  return '没有活动会话需要清除。';
 }
 
 function executeHelp(): string {
   return [
-    '**Available Commands**',
+    '**可用命令**',
     '',
-    '`/clear` - Clear conversation session and start fresh',
-    '`/status` - Show current group and session status',
-    '`/help` - Show this help message',
+    '`/clear` - 清除对话会话，重新开始',
+    '`/status` - 显示当前群组和会话状态',
+    '`/help` - 显示此帮助信息',
   ].join('\n');
 }
 
@@ -120,14 +120,14 @@ function executeStatus(
   const hasSession = !!sessions[group.folder];
 
   const lines = [
-    '**Status**',
+    '**状态**',
     '',
-    `**Group:** ${group.name}`,
-    `**Folder:** ${group.folder}`,
-    `**Session:** ${hasSession ? 'Active' : 'None'}`,
-    `**Trigger required:** ${group.requiresTrigger !== false ? 'Yes' : 'No'}`,
-    `**Main group:** ${group.isMain ? 'Yes' : 'No'}`,
-    `**Assistant:** ${ASSISTANT_NAME}`,
+    `**群组:** ${group.name}`,
+    `**文件夹:** ${group.folder}`,
+    `**会话:** ${hasSession ? '活跃' : '无'}`,
+    `**需要触发词:** ${group.requiresTrigger !== false ? '是' : '否'}`,
+    `**主群组:** ${group.isMain ? '是' : '否'}`,
+    `**助手:** ${ASSISTANT_NAME}`,
   ];
 
   return lines.join('\n');

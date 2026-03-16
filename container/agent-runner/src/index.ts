@@ -78,19 +78,19 @@ function interceptSlashCommand(prompt: string): string | null {
       log(`Intercepted slash command in agent runner: ${cmd}`);
       switch (cmd) {
         case '/clear':
-          return 'Session clear requested. This should be handled by the host. If you see this message, the session was not properly cleared — please try again.';
+          return '清除会话请求已发送。这应该由主机处理。如果您看到此消息，表示会话未被正确清除 — 请重试。';
         case '/help':
           return [
-            '**Available Commands**',
+            '**可用命令**',
             '',
-            '`/clear` - Clear conversation session and start fresh',
-            '`/status` - Show current group and session status',
-            '`/help` - Show this help message',
+            '`/clear` - 清除对话会话，重新开始',
+            '`/status` - 显示当前群组和会话状态',
+            '`/help` - 显示此帮助信息',
           ].join('\n');
         case '/status':
-          return 'Status information is available from the host. Send `/status` again if this did not work.';
+          return '状态信息可从主机获取。如果未生效，请再次发送 `/status`。';
         default:
-          return `Unknown command: \`${cmd}\``;
+          return `未知命令: \`${cmd}\``;
       }
     }
   }
