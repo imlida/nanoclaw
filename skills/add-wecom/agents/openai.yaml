@@ -1,7 +1,0 @@
-interface:
-  display_name: "Add WeCom"
-  short_description: "Add Enterprise WeChat channel support to NanoClaw."
-  default_prompt: "Use $add-wecom to install WeCom channel support into a NanoClaw fork."
-
-policy:
-  allow_implicit_invocation: false
