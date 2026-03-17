@@ -577,6 +577,11 @@ export class WecomChannel implements Channel {
     const streamId = generateReqId('stream');
     const client = this.client;
     let finished = false;
+    // Track whether any replyStream API call was made.  Finishing an
+    // un-activated stream would CREATE a new WeCom message (showing the
+    // default "正在搜索相关内容..." placeholder), so finish must be a no-op
+    // for streams that were never sent to WeCom.
+    let activated = false;
 
     logger.debug({ jid, streamId }, 'WeCom stream created');
 
@@ -598,6 +603,7 @@ export class WecomChannel implements Channel {
 
         if (bytes <= STREAM_MAX_BYTES) {
           await client.replyStream(frame, streamId, text, finish);
+          activated = true;
           if (finish) finished = true;
           return;
         }
@@ -611,6 +617,7 @@ export class WecomChannel implements Channel {
         }
 
         await client.replyStream(frame, streamId, truncated, true);
+        activated = true;
         finished = true;
 
         // Send full content as a follow-up message
@@ -633,7 +640,16 @@ export class WecomChannel implements Channel {
 
     return {
       update: (text: string) => sendChunk(text, false),
-      finish: (text: string) => sendChunk(text, true),
+      finish: (text: string) => {
+        // If no replyStream call was ever made, silently discard — calling
+        // finish would be the FIRST API call and create a phantom WeCom
+        // message with the "正在搜索相关内容..." placeholder.
+        if (!activated) {
+          finished = true;
+          return Promise.resolve();
+        }
+        return sendChunk(text, true);
+      },
     };
   }
 

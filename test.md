@@ -1,0 +1,1 @@
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw 2>&1

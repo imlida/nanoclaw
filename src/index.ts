@@ -232,37 +232,40 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       return val.toLowerCase() === 'true' || val === '1';
     })();
 
-  // Check if "thinking" indicator should be shown (WeCom only, default: false)
-  const showThinking =
-    channel.name === 'wecom' &&
-    (() => {
-      const envVars = readEnvFile(['WECOM_SHOW_THINKING']);
-      const val =
-        process.env.WECOM_SHOW_THINKING || envVars.WECOM_SHOW_THINKING || '';
-      return val.toLowerCase() === 'true' || val === '1';
-    })();
-
-  // Streaming state: create a fresh stream per response cycle.
-  // WeCom's replyStream updates a single message in-place; when one response
-  // ends (null-result marker) we finish the current stream and create a new
-  // one for the next IPC-driven response.
-  let currentStream: StreamSession | null =
-    channel.createStream?.(chatJid) ?? null;
+  // Streaming state: streams are created LAZILY — only when we actually need
+  // to send content.  This ensures we always use the most recent WeCom frame
+  // (req_id).  Eager creation would capture a stale req_id when follow-up
+  // messages arrive before the agent produces output, causing WeCom to show
+  // an orphaned "正在搜索相关内容..." placeholder.
+  let currentStream: StreamSession | null = null;
   let accumulatedText = '';
 
-  // Send immediate "thinking" acknowledgment via stream if enabled
-  if (showThinking && currentStream) {
-    try {
-      await currentStream.update('思考中...');
-      logger.debug({ group: group.name }, 'Sent thinking indicator via stream');
-    } catch (streamErr) {
-      logger.warn(
-        { group: group.name, err: streamErr },
-        'Failed to send thinking indicator',
-      );
-      currentStream = null;
+  // Helper: get or create a stream for the current JID using the latest frame.
+  const getOrCreateStream = (): StreamSession | null => {
+    if (!currentStream) {
+      currentStream = channel.createStream?.(chatJid) ?? null;
     }
-  }
+    return currentStream;
+  };
+
+  // Helper: abandon a stream that can no longer be used.  Tries to finish it
+  // so WeCom removes the "generating" spinner; if that also fails, we just log.
+  const abandonStream = (stream: StreamSession, text: string): void => {
+    stream.finish(text || '').catch((err) =>
+      logger.debug(
+        { group: group.name, err },
+        'Failed to finish abandoned stream',
+      ),
+    );
+  };
+
+  // Note: we intentionally do NOT send an initial "thinking" indicator here.
+  // Creating a stream eagerly captures the current req_id, but follow-up
+  // messages piped to the container will bring newer req_ids.  The old stream
+  // becomes orphaned and cannot be cleanly closed (WeCom shows a perpetual
+  // "正在搜索相关内容..." spinner for empty-finished streams).
+  // Instead, the typing indicator (setTyping) provides immediate feedback,
+  // and piped-message thinking indicators handle follow-up acknowledgments.
   let currentStreamText = ''; // Text being actively streamed token-by-token
   // Hide mode: tool calls are accumulated into an overlay buffer for real-time
   // display, then cleared when the text response arrives.
@@ -275,10 +278,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     // Check if a piped message created a new stream for us to use
     const pipedStream = queue.consumeActiveStream(chatJid);
     if (pipedStream) {
-      // Finish the old stream if it has content, then switch to the new one
-      if (currentStream && accumulatedText) {
+      // Always finish the old stream when switching — even if it has no
+      // accumulated text (e.g. it only showed "思考中...").  Without this,
+      // the WeCom "generating" indicator spins forever on orphaned streams.
+      if (currentStream) {
         try {
-          await currentStream.finish(accumulatedText);
+          await currentStream.finish(accumulatedText || '');
         } catch (e) {
           logger.debug(
             { group: group.name, err: e },
@@ -312,7 +317,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           currentToolStreamText = '';
         }
         // Build display: accumulated text + tool overlay + ephemeral tool text
-        if (currentStream) {
+        const toolStream = getOrCreateStream();
+        if (toolStream) {
           const parts: string[] = [];
           if (accumulatedText) parts.push(accumulatedText);
           const toolDisplay = currentToolStreamText
@@ -323,13 +329,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           if (toolDisplay) parts.push(toolDisplay);
           if (parts.length > 0) {
             try {
-              await currentStream.update(parts.join('\n\n'));
+              await toolStream.update(parts.join('\n\n'));
               outputSentToUser = true;
             } catch (streamErr) {
               logger.warn(
                 { group: group.name, err: streamErr },
                 'Stream update failed',
               );
+              abandonStream(toolStream, accumulatedText);
               currentStream = null;
             }
           }
@@ -358,18 +365,20 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           // Token-level streaming update: replace the current streaming segment
           // (agent-runner sends the full accumulated text for the current message)
           currentStreamText = text;
-          if (currentStream) {
+          const textStream = getOrCreateStream();
+          if (textStream) {
             const displayText = accumulatedText
               ? accumulatedText + '\n\n' + currentStreamText
               : currentStreamText;
             try {
-              await currentStream.update(displayText);
+              await textStream.update(displayText);
               outputSentToUser = true;
             } catch (streamErr) {
               logger.warn(
                 { group: group.name, err: streamErr },
                 'Stream update failed',
               );
+              abandonStream(textStream, accumulatedText);
               currentStream = null;
             }
           }
@@ -379,14 +388,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           // Complete message commit: append to accumulated text
           accumulatedText += (accumulatedText ? '\n\n' : '') + text;
           currentStreamText = '';
-          if (currentStream) {
+          const commitStream = getOrCreateStream();
+          if (commitStream) {
             try {
-              await currentStream.update(accumulatedText);
+              await commitStream.update(accumulatedText);
             } catch (streamErr) {
               logger.warn(
                 { group: group.name, err: streamErr },
                 'Stream update failed, falling back to sendMessage',
               );
+              abandonStream(commitStream, accumulatedText);
               await channel.sendMessage(chatJid, text);
               currentStream = null;
             }
@@ -411,9 +422,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       toolCallsOverlay = '';
       currentToolStreamText = '';
       // Finalize the stream so WeCom removes the "generating" indicator.
-      if (currentStream && accumulatedText) {
+      if (currentStream) {
         try {
-          await currentStream.finish(accumulatedText);
+          await currentStream.finish(accumulatedText || '');
         } catch (streamErr) {
           logger.warn(
             { group: group.name, err: streamErr },
@@ -421,9 +432,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
           );
         }
       }
-      // Reset for the next response cycle (IPC follow-up messages)
+      // Reset for the next response cycle (IPC follow-up messages).
+      // Don't create a new stream eagerly — it will be created lazily
+      // when the next output arrives, ensuring it uses the latest frame.
       accumulatedText = '';
-      currentStream = channel.createStream?.(chatJid) ?? null;
+      currentStream = null;
       queue.notifyIdle(chatJid);
     }
 
@@ -445,10 +458,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         accumulatedText += (accumulatedText ? '\n\n' : '') + currentStreamText;
         currentStreamText = '';
       }
-      if (currentStream && accumulatedText) {
-        currentStream
-          .finish(accumulatedText)
-          .catch((err) =>
+      if (currentStream) {
+        (currentStream as StreamSession)
+          .finish(accumulatedText || '')
+          .catch((err: unknown) =>
             logger.warn(
               { group: group.name, err },
               'Stream finish on error failed',
@@ -469,6 +482,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       'Agent error, rolled back message cursor for retry',
     );
     return false;
+  }
+
+  // Clean up any remaining stream so WeCom doesn't show a perpetual spinner.
+  if (currentStream) {
+    (currentStream as StreamSession)
+      .finish(accumulatedText || '')
+      .catch((err: unknown) =>
+        logger.debug(
+          { group: group.name, err },
+          'Failed to finish stream on process exit',
+        ),
+      );
   }
 
   return true;
@@ -638,35 +663,13 @@ async function startMessageLoop(): Promise<void> {
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
 
-            // Send immediate "thinking" acknowledgment for piped messages if enabled
-            const showThinkingForPiped =
-              channel.name === 'wecom' &&
-              (() => {
-                const envVars = readEnvFile(['WECOM_SHOW_THINKING']);
-                const val =
-                  process.env.WECOM_SHOW_THINKING ||
-                  envVars.WECOM_SHOW_THINKING ||
-                  '';
-                return val.toLowerCase() === 'true' || val === '1';
-              })();
-
-            if (showThinkingForPiped) {
-              const pipedStream = channel.createStream?.(chatJid);
-              if (pipedStream) {
-                pipedStream
-                  .update('思考中...')
-                  .catch((err) =>
-                    logger.warn(
-                      { chatJid, err },
-                      'Failed to send thinking indicator for piped message',
-                    ),
-                  );
-                // Store the stream so outputCallback can use it
-                queue.setActiveStream(chatJid, pipedStream);
-              }
-            }
-
             // Show typing indicator while the container processes the piped message
+            // Note: we don't create a stream-based "thinking" indicator for piped
+            // messages because the frame's req_id may be superseded by subsequent
+            // messages, causing WeCom to show an orphaned "正在搜索相关内容..."
+            // spinner.  The typing indicator provides visual feedback instead,
+            // and the actual response will create a stream lazily with the latest
+            // frame when output is ready.
             channel
               .setTyping?.(chatJid, true)
               ?.catch((err) =>

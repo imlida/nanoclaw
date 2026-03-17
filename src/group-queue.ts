@@ -158,10 +158,24 @@ export class GroupQueue {
   }
 
   /**
+   * Check if a piped stream already exists for the given group.
+   */
+  hasActiveStream(groupJid: string): boolean {
+    const state = this.groups.get(groupJid);
+    return state?.pipedStream != null;
+  }
+
+  /**
    * Store a stream for piped messages so outputCallback can pick it up.
+   * If a previous piped stream exists, finishes it first to prevent
+   * orphaned "思考中..." messages.
    */
   setActiveStream(groupJid: string, stream: StreamSession): void {
     const state = this.getGroup(groupJid);
+    if (state.pipedStream) {
+      // Finish the orphaned stream so WeCom removes the "generating" indicator
+      state.pipedStream.finish('').catch(() => {});
+    }
     state.pipedStream = stream;
   }
 
