@@ -186,7 +186,10 @@ async function runTask(
         if (streamedOutput.result) {
           // Skip streaming (partial) and tool_status outputs — only send
           // committed text results to avoid duplicate/partial messages.
-          if (!streamedOutput.streaming && streamedOutput.type !== 'tool_status') {
+          if (
+            !streamedOutput.streaming &&
+            streamedOutput.type !== 'tool_status'
+          ) {
             result = streamedOutput.result;
             // Forward result to user (sendMessage handles formatting)
             await deps.sendMessage(task.chat_jid, streamedOutput.result);
