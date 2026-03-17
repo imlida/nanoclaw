@@ -92,7 +92,17 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     'IPC message sent',
                   );
                 } else if (data.type === 'send_file' && data.filePath) {
-                  await deps.sendFile(data.chatJid, data.filePath);
+                  // Translate container path to host path
+                  const hostPath = (data.filePath as string).startsWith(
+                    '/workspace/wecom-media/',
+                  )
+                    ? path.join(
+                        DATA_DIR,
+                        'wecom-media',
+                        path.basename(data.filePath as string),
+                      )
+                    : (data.filePath as string);
+                  await deps.sendFile(data.chatJid, hostPath);
                   logger.info(
                     {
                       chatJid: data.chatJid,
