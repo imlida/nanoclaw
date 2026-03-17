@@ -78,8 +78,7 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 const authorized =
-                  isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup);
+                  isMain || (targetGroup && targetGroup.folder === sourceGroup);
 
                 if (!authorized) {
                   logger.warn(
@@ -95,7 +94,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
                 } else if (data.type === 'send_file' && data.filePath) {
                   await deps.sendFile(data.chatJid, data.filePath);
                   logger.info(
-                    { chatJid: data.chatJid, sourceGroup, filePath: data.filePath },
+                    {
+                      chatJid: data.chatJid,
+                      sourceGroup,
+                      filePath: data.filePath,
+                    },
                     'IPC file sent',
                   );
                 }

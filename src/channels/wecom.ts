@@ -130,10 +130,7 @@ function formatImageInfo(
  * Format file information for inclusion in message content.
  * Returns a Markdown-style link with the local file path if available.
  */
-function formatFileInfo(
-  localPath?: string,
-  originalFilename?: string,
-): string {
+function formatFileInfo(localPath?: string, originalFilename?: string): string {
   if (localPath) {
     const displayName = originalFilename || path.basename(localPath);
     return `[WeCom File: ${displayName}](${toContainerPath(localPath)})`;
@@ -298,7 +295,9 @@ export class WecomChannel implements Channel {
       ensureMediaDir();
       const { buffer, filename } = await this.client.downloadFile(url, aeskey);
 
-      const ext = filename ? path.extname(filename).slice(1) || defaultExt : defaultExt;
+      const ext = filename
+        ? path.extname(filename).slice(1) || defaultExt
+        : defaultExt;
       const localFilename = generateMediaFilename(ext);
       const localPath = path.join(WECOM_MEDIA_DIR, localFilename);
 
