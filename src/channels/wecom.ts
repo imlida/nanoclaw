@@ -24,6 +24,20 @@ import { registerChannel, type ChannelOpts } from './registry.js';
 /** Maximum content size for a single replyStream call (WeCom limit: 20480 bytes). */
 const STREAM_MAX_BYTES = 20480;
 
+/** Cooldown period after hitting rate limit (errcode 846607). */
+const RATE_LIMIT_COOLDOWN_MS = 60_000;
+
+/** Check if an error is a WeCom rate limit error (846607). */
+function isRateLimitError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const obj = err as Record<string, unknown>;
+  return (
+    obj.errcode === 846607 ||
+    (typeof obj.errmsg === 'string' &&
+      obj.errmsg.includes('frequency limit exceeded'))
+  );
+}
+
 type WecomFrame =
   | WsFrame<BaseMessage>
   | WsFrame<FileMessage>
@@ -201,12 +215,38 @@ export class WecomChannel implements Channel {
   private connectPromise: Promise<void> | null = null;
   /** Most recent inbound frame per JID — needed for replyStream. */
   private lastFrameByJid = new Map<string, WsFrameHeaders>();
+  /** Timestamp when rate limit cooldown expires (0 = not rate limited). */
+  private rateLimitUntil = 0;
 
   constructor(
     private opts: ChannelOpts,
     private botId: string,
     private secret: string,
   ) {}
+
+  /**
+   * Check if currently rate limited. If so, throw a descriptive error
+   * instead of hitting the API again.
+   */
+  private checkRateLimit(): void {
+    if (this.rateLimitUntil > Date.now()) {
+      const remainMs = this.rateLimitUntil - Date.now();
+      throw new Error(
+        `WeCom rate limited, cooling down for ${Math.ceil(remainMs / 1000)}s`,
+      );
+    }
+  }
+
+  /**
+   * Mark the channel as rate limited after receiving errcode 846607.
+   */
+  private onRateLimited(err: unknown): void {
+    this.rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+    logger.warn(
+      { cooldownMs: RATE_LIMIT_COOLDOWN_MS, err },
+      'WeCom rate limit hit (846607), pausing sends',
+    );
+  }
 
   async connect(): Promise<void> {
     if (this.connected) return;
@@ -446,11 +486,19 @@ export class WecomChannel implements Channel {
     if (!this.client) {
       throw new Error('WeCom client is not connected');
     }
+    this.checkRateLimit();
 
-    await this.client.sendMessage(targetId, {
-      msgtype: 'markdown',
-      markdown: { content: text },
-    });
+    try {
+      await this.client.sendMessage(targetId, {
+        msgtype: 'markdown',
+        markdown: { content: text },
+      });
+    } catch (err) {
+      if (isRateLimitError(err)) {
+        this.onRateLimited(err);
+      }
+      throw err;
+    }
   }
 
   async sendFile(jid: string, filePath: string): Promise<void> {
@@ -478,18 +526,26 @@ export class WecomChannel implements Channel {
       { jid, filePath, filename, mediaType, size: fileBuffer.length },
       'Uploading file to WeCom',
     );
+    this.checkRateLimit();
 
-    const result = await this.client.uploadMedia(fileBuffer, {
-      type: mediaType,
-      filename,
-    });
+    try {
+      const result = await this.client.uploadMedia(fileBuffer, {
+        type: mediaType,
+        filename,
+      });
 
-    logger.info(
-      { jid, mediaId: result.media_id, mediaType },
-      'File uploaded, sending media message',
-    );
+      logger.info(
+        { jid, mediaId: result.media_id, mediaType },
+        'File uploaded, sending media message',
+      );
 
-    await this.client.sendMediaMessage(targetId, mediaType, result.media_id);
+      await this.client.sendMediaMessage(targetId, mediaType, result.media_id);
+    } catch (err) {
+      if (isRateLimitError(err)) {
+        this.onRateLimited(err);
+      }
+      throw err;
+    }
   }
 
   isConnected(): boolean {
@@ -530,32 +586,48 @@ export class WecomChannel implements Channel {
         return;
       }
 
-      const bytes = Buffer.byteLength(text, 'utf8');
-
-      if (bytes <= STREAM_MAX_BYTES) {
-        await client.replyStream(frame, streamId, text, finish);
+      // Skip if currently rate limited
+      if (this.rateLimitUntil > Date.now()) {
         if (finish) finished = true;
+        logger.debug({ jid, streamId }, 'Stream send skipped: rate limited');
         return;
       }
 
-      // Content exceeds the stream limit: truncate to the last full character
-      // boundary that fits, finish the stream, then send the full text as a
-      // standalone markdown message so nothing is lost.
-      let truncated = text;
-      while (Buffer.byteLength(truncated, 'utf8') > STREAM_MAX_BYTES) {
-        truncated = truncated.slice(0, -100);
-      }
+      try {
+        const bytes = Buffer.byteLength(text, 'utf8');
 
-      await client.replyStream(frame, streamId, truncated, true);
-      finished = true;
+        if (bytes <= STREAM_MAX_BYTES) {
+          await client.replyStream(frame, streamId, text, finish);
+          if (finish) finished = true;
+          return;
+        }
 
-      // Send full content as a follow-up message
-      const targetId = parseTargetJid(jid);
-      if (targetId) {
-        await client.sendMessage(targetId, {
-          msgtype: 'markdown',
-          markdown: { content: text },
-        });
+        // Content exceeds the stream limit: truncate to the last full character
+        // boundary that fits, finish the stream, then send the full text as a
+        // standalone markdown message so nothing is lost.
+        let truncated = text;
+        while (Buffer.byteLength(truncated, 'utf8') > STREAM_MAX_BYTES) {
+          truncated = truncated.slice(0, -100);
+        }
+
+        await client.replyStream(frame, streamId, truncated, true);
+        finished = true;
+
+        // Send full content as a follow-up message
+        const targetId = parseTargetJid(jid);
+        if (targetId) {
+          await client.sendMessage(targetId, {
+            msgtype: 'markdown',
+            markdown: { content: text },
+          });
+        }
+      } catch (err) {
+        if (isRateLimitError(err)) {
+          this.onRateLimited(err);
+          if (finish) finished = true;
+          return;
+        }
+        throw err;
       }
     };
 

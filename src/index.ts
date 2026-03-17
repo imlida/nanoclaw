@@ -913,6 +913,20 @@ const isDirectRun =
     new URL(`file://${process.argv[1]}`).pathname;
 
 if (isDirectRun) {
+  // Suppress WeCom SDK internal retry noise for rate limit errors (846607).
+  // The SDK fires-and-forgets retry promises that reject as unhandled.
+  process.on('unhandledRejection', (reason) => {
+    if (
+      reason &&
+      typeof reason === 'object' &&
+      (reason as Record<string, unknown>).errcode === 846607
+    ) {
+      // Already logged by WecomChannel.onRateLimited — suppress the noise
+      return;
+    }
+    logger.error({ err: reason }, 'Unhandled rejection');
+  });
+
   main().catch((err) => {
     logger.error({ err }, 'Failed to start NanoClaw');
     process.exit(1);

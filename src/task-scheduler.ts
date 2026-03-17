@@ -184,10 +184,14 @@ async function runTask(
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
-          result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
-          scheduleClose();
+          // Skip streaming (partial) and tool_status outputs — only send
+          // committed text results to avoid duplicate/partial messages.
+          if (!streamedOutput.streaming && streamedOutput.type !== 'tool_status') {
+            result = streamedOutput.result;
+            // Forward result to user (sendMessage handles formatting)
+            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+            scheduleClose();
+          }
         }
         if (streamedOutput.status === 'success') {
           deps.queue.notifyIdle(task.chat_jid);
