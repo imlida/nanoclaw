@@ -251,12 +251,14 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   // Helper: abandon a stream that can no longer be used.  Tries to finish it
   // so WeCom removes the "generating" spinner; if that also fails, we just log.
   const abandonStream = (stream: StreamSession, text: string): void => {
-    stream.finish(text || '').catch((err) =>
-      logger.debug(
-        { group: group.name, err },
-        'Failed to finish abandoned stream',
-      ),
-    );
+    stream
+      .finish(text || '')
+      .catch((err) =>
+        logger.debug(
+          { group: group.name, err },
+          'Failed to finish abandoned stream',
+        ),
+      );
   };
 
   // Note: we intentionally do NOT send an initial "thinking" indicator here.
