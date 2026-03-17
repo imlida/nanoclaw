@@ -107,6 +107,8 @@ export interface Channel {
   // given JID, or null if streaming is not available (e.g. no stored frame).
   // Callers should fall back to sendMessage when null is returned.
   createStream?(jid: string): StreamSession | null;
+  // Optional: send a file to the chat. filePath is an absolute host path.
+  sendFile?(jid: string, filePath: string): Promise<void>;
 }
 
 // Callback type that channels use to deliver inbound messages

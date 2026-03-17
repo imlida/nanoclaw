@@ -12,6 +12,7 @@ import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
+  sendFile: (jid: string, filePath: string) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
   syncGroups: (force: boolean) => Promise<void>;
@@ -73,22 +74,29 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const filePath = path.join(messagesDir, file);
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
+              if (data.chatJid) {
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
-                if (
+                const authorized =
                   isMain ||
-                  (targetGroup && targetGroup.folder === sourceGroup)
-                ) {
+                  (targetGroup && targetGroup.folder === sourceGroup);
+
+                if (!authorized) {
+                  logger.warn(
+                    { chatJid: data.chatJid, sourceGroup, type: data.type },
+                    'Unauthorized IPC message attempt blocked',
+                  );
+                } else if (data.type === 'message' && data.text) {
                   await deps.sendMessage(data.chatJid, data.text);
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
                     'IPC message sent',
                   );
-                } else {
-                  logger.warn(
-                    { chatJid: data.chatJid, sourceGroup },
-                    'Unauthorized IPC message attempt blocked',
+                } else if (data.type === 'send_file' && data.filePath) {
+                  await deps.sendFile(data.chatJid, data.filePath);
+                  logger.info(
+                    { chatJid: data.chatJid, sourceGroup, filePath: data.filePath },
+                    'IPC file sent',
                   );
                 }
               }

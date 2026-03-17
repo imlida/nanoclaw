@@ -63,6 +63,64 @@ server.tool(
 );
 
 server.tool(
+  'send_file',
+  `Send a file to the user or group. The file must exist on the local filesystem.
+Supported: images (jpg, png, gif, bmp, webp) and general files (pdf, doc, xlsx, zip, etc.).
+The file is uploaded to the messaging platform and delivered as a native file/image message.`,
+  {
+    file_path: z.string().describe('Absolute path to the file to send (e.g., /workspace/group/report.pdf)'),
+    caption: z.string().optional().describe('Optional text message to send along with the file'),
+  },
+  async (args) => {
+    if (!fs.existsSync(args.file_path)) {
+      return {
+        content: [{ type: 'text' as const, text: `File not found: ${args.file_path}` }],
+        isError: true,
+      };
+    }
+
+    const stat = fs.statSync(args.file_path);
+    if (!stat.isFile()) {
+      return {
+        content: [{ type: 'text' as const, text: `Not a file: ${args.file_path}` }],
+        isError: true,
+      };
+    }
+
+    // Copy file to wecom-media dir so the host can access it
+    const wecomMediaDir = '/workspace/wecom-media';
+    fs.mkdirSync(wecomMediaDir, { recursive: true });
+
+    const ext = args.file_path.split('.').pop() || 'bin';
+    const destFilename = `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const destPath = `${wecomMediaDir}/${destFilename}`;
+    fs.copyFileSync(args.file_path, destPath);
+
+    // Send caption first if provided
+    if (args.caption) {
+      writeIpcFile(MESSAGES_DIR, {
+        type: 'message',
+        chatJid,
+        text: args.caption,
+        groupFolder,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Send file via IPC
+    writeIpcFile(MESSAGES_DIR, {
+      type: 'send_file',
+      chatJid,
+      filePath: destPath,
+      groupFolder,
+      timestamp: new Date().toISOString(),
+    });
+
+    return { content: [{ type: 'text' as const, text: `File queued for sending: ${path.basename(args.file_path)}` }] };
+  },
+);
+
+server.tool(
   'schedule_task',
   `Schedule a recurring or one-time task. The task will run as a full agent with access to all tools. Returns the task ID for future reference. To modify an existing task, use update_task instead.
 

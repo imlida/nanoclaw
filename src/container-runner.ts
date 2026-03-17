@@ -193,15 +193,15 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // WeCom media: downloaded images need to be readable inside the container
+  // WeCom media: downloaded files/images readable inside the container;
+  // read-write so agents can stage files for outbound upload via IPC.
   const wecomMediaDir = path.join(DATA_DIR, 'wecom-media');
-  if (fs.existsSync(wecomMediaDir)) {
-    mounts.push({
-      hostPath: wecomMediaDir,
-      containerPath: '/workspace/wecom-media',
-      readonly: true,
-    });
-  }
+  fs.mkdirSync(wecomMediaDir, { recursive: true });
+  mounts.push({
+    hostPath: wecomMediaDir,
+    containerPath: '/workspace/wecom-media',
+    readonly: false,
+  });
 
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {

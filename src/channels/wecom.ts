@@ -103,6 +103,11 @@ function generateMediaFilename(ext: string = 'jpg'): string {
   return `wecom-${timestamp}-${random}.${ext}`;
 }
 
+/** Convert a host-local path to a container-accessible path. */
+function toContainerPath(localPath: string): string {
+  return `/workspace/wecom-media/${path.basename(localPath)}`;
+}
+
 /**
  * Format image information for inclusion in message content.
  * Returns a Markdown-style description with the local file path if available.
@@ -112,15 +117,28 @@ function formatImageInfo(
   localPath?: string,
 ): string {
   if (localPath) {
-    // Use the container-accessible path (wecom-media is mounted at /workspace/wecom-media)
-    const containerPath = `/workspace/wecom-media/${path.basename(localPath)}`;
-    return `![WeCom Image](${containerPath})`;
+    return `![WeCom Image](${toContainerPath(localPath)})`;
   }
   if (image?.url) {
     // Fallback: include URL info (note: encrypted, 5-min expiry)
     return `[WeCom image: ${image.url.substring(0, 80)}...]`;
   }
   return '[WeCom image attachment]';
+}
+
+/**
+ * Format file information for inclusion in message content.
+ * Returns a Markdown-style link with the local file path if available.
+ */
+function formatFileInfo(
+  localPath?: string,
+  originalFilename?: string,
+): string {
+  if (localPath) {
+    const displayName = originalFilename || path.basename(localPath);
+    return `[WeCom File: ${displayName}](${toContainerPath(localPath)})`;
+  }
+  return '[WeCom file attachment]';
 }
 
 function extractMixedText(
@@ -145,6 +163,7 @@ function buildContent(
   body: BaseMessage,
   imageLocalPath?: string,
   mixedImagePaths?: Map<number, string>,
+  fileInfo?: { localPath: string; originalFilename?: string },
 ): string {
   switch (body.msgtype) {
     case 'text':
@@ -157,13 +176,8 @@ function buildContent(
       const imageBody = body as ImageMessage;
       return formatImageInfo(imageBody.image, imageLocalPath);
     }
-    case 'file': {
-      const fileBody = body as FileMessage;
-      if (fileBody.file?.url) {
-        return `[WeCom file: ${fileBody.file.url.substring(0, 80)}...]`;
-      }
-      return '[WeCom file attachment]';
-    }
+    case 'file':
+      return formatFileInfo(fileInfo?.localPath, fileInfo?.originalFilename);
     default:
       return `[WeCom ${String(body.msgtype)} message]`;
   }
@@ -270,38 +284,47 @@ export class WecomChannel implements Channel {
   }
 
   /**
-   * Download an image from WeCom and save it locally.
+   * Download a file from WeCom and save it locally.
    * Returns the local file path on success, undefined on failure.
    */
-  private async downloadImage(
+  private async downloadMedia(
     url: string,
     aeskey?: string,
-  ): Promise<string | undefined> {
+    defaultExt: string = 'jpg',
+  ): Promise<{ localPath: string; originalFilename?: string } | undefined> {
     if (!this.client || !url) return undefined;
 
     try {
       ensureMediaDir();
       const { buffer, filename } = await this.client.downloadFile(url, aeskey);
 
-      // Determine file extension from filename or default to jpg
-      const ext = filename ? path.extname(filename).slice(1) || 'jpg' : 'jpg';
+      const ext = filename ? path.extname(filename).slice(1) || defaultExt : defaultExt;
       const localFilename = generateMediaFilename(ext);
       const localPath = path.join(WECOM_MEDIA_DIR, localFilename);
 
       fs.writeFileSync(localPath, buffer);
       logger.debug(
         { localPath, originalFilename: filename },
-        'WeCom image downloaded',
+        'WeCom media downloaded',
       );
 
-      return localPath;
+      return { localPath, originalFilename: filename };
     } catch (err) {
       logger.warn(
         { err, url: url.substring(0, 50) },
-        'Failed to download WeCom image',
+        'Failed to download WeCom media',
       );
       return undefined;
     }
+  }
+
+  /** Backwards-compatible helper for image downloads. */
+  private async downloadImage(
+    url: string,
+    aeskey?: string,
+  ): Promise<string | undefined> {
+    const result = await this.downloadMedia(url, aeskey, 'jpg');
+    return result?.localPath;
   }
 
   /**
@@ -361,9 +384,10 @@ export class WecomChannel implements Channel {
       return;
     }
 
-    // Download images based on message type
+    // Download media based on message type
     let imageLocalPath: string | undefined;
     let mixedImagePaths: Map<number, string> | undefined;
+    let fileInfo: { localPath: string; originalFilename?: string } | undefined;
 
     if (body.msgtype === 'image') {
       const imageBody = body as ImageMessage;
@@ -373,10 +397,25 @@ export class WecomChannel implements Channel {
       );
     } else if (body.msgtype === 'mixed') {
       mixedImagePaths = await this.downloadMixedImages(body as MixedMessage);
+    } else if (body.msgtype === 'file') {
+      const fileBody = body as FileMessage;
+      if (fileBody.file?.url) {
+        const result = await this.downloadMedia(
+          fileBody.file.url,
+          fileBody.file.aeskey,
+          'bin',
+        );
+        if (result) {
+          fileInfo = {
+            localPath: result.localPath,
+            originalFilename: result.originalFilename,
+          };
+        }
+      }
     }
 
     const content = withQuote(
-      buildContent(body, imageLocalPath, mixedImagePaths),
+      buildContent(body, imageLocalPath, mixedImagePaths, fileInfo),
       body.quote,
     ).trim();
 
@@ -413,6 +452,45 @@ export class WecomChannel implements Channel {
       msgtype: 'markdown',
       markdown: { content: text },
     });
+  }
+
+  async sendFile(jid: string, filePath: string): Promise<void> {
+    const targetId = parseTargetJid(jid);
+    if (!targetId) {
+      throw new Error(`Invalid WeCom JID: ${jid}`);
+    }
+    if (!this.client) {
+      throw new Error('WeCom client is not connected');
+    }
+
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+
+    const fileBuffer = fs.readFileSync(filePath);
+    const filename = path.basename(filePath);
+    const ext = path.extname(filename).slice(1).toLowerCase();
+
+    // Determine media type from extension
+    const imageExts = new Set(['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp']);
+    const mediaType: 'file' | 'image' = imageExts.has(ext) ? 'image' : 'file';
+
+    logger.info(
+      { jid, filePath, filename, mediaType, size: fileBuffer.length },
+      'Uploading file to WeCom',
+    );
+
+    const result = await this.client.uploadMedia(fileBuffer, {
+      type: mediaType,
+      filename,
+    });
+
+    logger.info(
+      { jid, mediaId: result.media_id, mediaType },
+      'File uploaded, sending media message',
+    );
+
+    await this.client.sendMediaMessage(targetId, mediaType, result.media_id);
   }
 
   isConnected(): boolean {
